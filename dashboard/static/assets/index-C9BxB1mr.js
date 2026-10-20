@@ -1162,7 +1162,7 @@ window.__V63DISK_BOOT = 1;
   }
   function show(r) {
     mk();
-    var free = freeOf(r), extra = '';
+    var free = freeOf(r), extra = '', local = r && r.storage_mode === 'local';
     try {
       var tb = (r && r.tables) || [];
       for (var i = 0; i < tb.length; i++) {
@@ -1174,10 +1174,14 @@ window.__V63DISK_BOOT = 1;
     } catch (e) { }
     if (msgEl) {
       var probeBad = r && r.probe && r.probe.ok === false;
-      if (probeBad) {
-        msgEl.textContent = 'Server storage quota is FULL - SQLite writes are '
-          + 'failing. Fix in the Bash console: python3 cleanup_disk.py --repair, '
-          + 'then press Reload on the Web tab.' + extra;
+      if (local && probeBad) {
+        msgEl.textContent = 'Local storage is unavailable. Free space on this PC, '
+          + 'close other dashboard processes, and retry.' + extra;
+      } else if (local) {
+        msgEl.textContent = 'Local storage is low' + (free != null ? ' - ' + free
+          + ' MB free' : '') + '. Free space before running another import.';
+      } else if (probeBad) {
+        msgEl.textContent = 'Server storage is unavailable or full.' + extra;
       } else {
         msgEl.textContent = 'Server disk is low' + (free != null ? ' - ' + free
           + ' MB free' : '') + extra + '. Dashboard data may fail to load.';
@@ -1212,12 +1216,12 @@ window.__V63DISK_BOOT = 1;
       try { r = JSON.parse(x.responseText); } catch (e) { }
       if (!r) { if (!afterCleanup) hide(); return; }
       var free = freeOf(r);
-      var low = r.action_required === true || (free != null && free < 200);
+      var low = r.action_required === true;
       if (afterCleanup) {
         if (low) {
-          done('Storage is still tight. For the real fix run in the Bash '
-            + 'console: python3 cleanup_disk.py --repair, then press Reload '
-            + 'on the Web tab.', false);
+          done(r.storage_mode === 'local'
+            ? 'Local storage is still low. Free space on this PC and retry.'
+            : 'Server storage is still low. Contact the server administrator.', false);
         } else {
           done('Space freed' + (free != null ? ' - ' + free + ' MB free now.' : '.'), true);
         }

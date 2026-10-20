@@ -922,13 +922,25 @@ def _v6324_write_probe(dbp):
         return (False, str(_exc)[:200])
 
 
-def _v6324_action_required(free_mb, probe_ok, wal_mb):
+def _v6324_is_storage_error(error):
+    low = str(error or '').lower()
+    return any(marker in low for marker in (
+        'database or disk is full', 'disk is full', 'disk i/o error',
+        'no space left on device', 'unable to open database file',
+        'readonly database',
+    ))
+
+
+def _v6324_action_required(free_mb, probe_ok, wal_mb, probe_error='', desktop_mode=None):
     """V63.24: keputusan action_required — dipakai disk-report & pill UI.
     free_mb bisa None (disk_usage gagal); probe/wal dari pengamatan nyata.
-    Probe gagal = kuota penuh sesungguhnya (disk host menipu di PA)."""
+    Desktop mengabaikan lock/busy sementara; hanya error storage nyata yang
+    memicu peringatan. Server lama tetap memakai perilaku kompatibel."""
+    if desktop_mode is None:
+        desktop_mode = os.environ.get('SERVEONE_DESKTOP_MODE') == '1'
     if probe_ok is False:
-        return True
-    if wal_mb is not None and wal_mb > 100:
+        return (not desktop_mode) or _v6324_is_storage_error(probe_error)
+    if not desktop_mode and wal_mb is not None and wal_mb > 100:
         return True
     return bool(free_mb is not None and free_mb < 200)
 _V6323_GUARD_LOCK = threading.Lock()
@@ -1043,13 +1055,18 @@ def _v6323_disk_guard(reason='auto', _free_bytes=None, _probe_ok=None, _wal_mb=N
                 _probe_ok, _probe_err = _v6324_write_probe(_dbp0)
             else:
                 _probe_ok = True
+        _desktop_mode = os.environ.get('SERVEONE_DESKTOP_MODE') == '1'
+        _probe_pressure = bool(not _probe_ok and
+                               (not _desktop_mode or _v6324_is_storage_error(_probe_err)))
         with _V6323_GUARD_LOCK:
             _V6323_GUARD['last_check'] = time.time()
             _V6323_GUARD['last_free_mb'] = round(_free / 1048576.0, 1)
             _V6323_GUARD['probe_ok'] = bool(_probe_ok)
             _V6323_GUARD['wal_mb'] = _wal_mb
-            _V6323_GUARD['pressure'] = bool((not _probe_ok) or _wal_mb > 100)
-        if _free >= _V6323_DISK_GUARD_MB * 1048576.0 and _probe_ok and _wal_mb <= 100:
+            _V6323_GUARD['pressure'] = bool(_probe_pressure or
+                                             (not _desktop_mode and _wal_mb > 100))
+        if (_free >= _V6323_DISK_GUARD_MB * 1048576.0 and not _probe_pressure
+                and (_desktop_mode or _wal_mb <= 100)):
             return
         if not _probe_ok:
             print(f'[v6324-guard] WRITE-PROBE GAGAL (kuota penuh? disk host masih '
@@ -18188,10 +18205,8 @@ def _v6323_json_error_handler(e):
         return e
     _msg = str(e)[:300]
     _low = _msg.lower()
-    _disk_issue = (('disk i/o' in _low) or ('database is locked' in _low)
-                   or ('disk is full' in _low) or ('database or disk is full' in _low)
-                   or ('unable to open database file' in _low)
-                   or ('malformed' in _low))
+    _disk_issue = _v6324_is_storage_error(_msg)
+    _db_busy = ('database is locked' in _low) or ('database table is locked' in _low)
     if _disk_issue:
         try:
             _v6323_disk_guard('error-handler')
@@ -18204,12 +18219,16 @@ def _v6323_json_error_handler(e):
     _payload = {'error': 'Internal server error', 'detail': _msg}
     if _disk_issue:
         _payload['disk_issue'] = True
-        _payload['hint'] = ('Server storage is full or busy. The dashboard is '
-                            'cleaning up automatically — click the red "Free space" '
-                            'pill at the bottom-right, or open '
-                            '/api/maintenance/disk-report for details. If the '
-                            'error persists, run `python3 cleanup_disk.py --repair` '
-                            'in the Bash console, then press Reload on the Web tab.')
+        if os.environ.get('SERVEONE_DESKTOP_MODE') == '1':
+            _payload['hint'] = ('Local storage is unavailable or full. Free space '
+                                'on this PC and retry the operation.')
+        else:
+            _payload['hint'] = ('Server storage is unavailable or full. Open '
+                                '/api/maintenance/disk-report for details.')
+    elif _db_busy:
+        _payload['database_busy'] = True
+        _payload['hint'] = ('The local database is busy with another process. '
+                            'Wait for the active Auto Update process, then retry.')
     return jsonify(_payload), 500
 
 
@@ -18268,7 +18287,10 @@ def maintenance_disk_report():
     penyusutan VACUUM), 20 file terbesar di folder aplikasi, auto-vacuum state,
     dan 10 upload terakhir. Read-only; tidak mengubah apa pun."""
     import sqlite3 as _sq3
-    out = {'generated_at': datetime.utcnow().isoformat() + 'Z', 'version': 'V63.27.11'}
+    desktop_mode = os.environ.get('SERVEONE_DESKTOP_MODE') == '1'
+    out = {'generated_at': datetime.utcnow().isoformat() + 'Z',
+           'version': 'V1.0.0',
+           'storage_mode': 'local' if desktop_mode else 'server'}
     app_dir = os.environ.get('SERVEONE_DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
     inst = os.path.join(app_dir, 'instance')
     dbp = os.path.join(inst, 'po_database.db')
@@ -18290,9 +18312,8 @@ def maintenance_disk_report():
             'used_mb': round(du.used / 1048576.0, 1),
             'free_mb': round(du.free / 1048576.0, 1),
             'used_pct': round(du.used * 100.0 / du.total, 1) if du.total else None,
-            'note': 'kuota PythonAnywhere mencakup SELURUH home directory; '
-                    'jalankan python3 cleanup_disk.py di Bash console untuk '
-                    'pemetaan di luar folder aplikasi (~/.cache/pip dll)',
+            'note': ('Local application storage on this PC.' if desktop_mode else
+                     'Server filesystem usage.'),
         }
     except Exception as exc:
         out['disk'] = {'error': str(exc)[:200]}
@@ -18448,24 +18469,21 @@ def maintenance_disk_report():
         _wal_mb6324 = float((out.get('instance') or {}).get('wal_mb') or 0.0)
     except Exception:
         pass
-    out['action_required'] = _v6324_action_required(_free_mb6323, _probe_ok6324, _wal_mb6324)
+    out['action_required'] = _v6324_action_required(
+        _free_mb6323, _probe_ok6324, _wal_mb6324,
+        probe_error=_probe_err6324, desktop_mode=desktop_mode)
     if out['action_required'] and not _probe_ok6324:
-        out['advice'] = ('Storage quota is exhausted — SQLite writes are failing. '
-                         'Fix (no deploy needed): in the Bash console run '
-                         '`python3 cleanup_disk.py --repair` (backs the DB up to '
-                         '/tmp, drops the lost_and_found recovery table, compacts '
-                         'the DB via /tmp and restores it), then press Reload on '
-                         'the Web tab. If cleanup_disk.py is still an old version, '
-                         're-upload it from the latest package first.')
+        out['advice'] = (('Local storage is unavailable or full. Free space on '
+                          'this PC, close other dashboard processes, and retry.')
+                         if desktop_mode else
+                         'Server storage is unavailable or full. Contact the server administrator.')
     elif out['action_required'] and _wal_mb6324 > 100:
         out['advice'] = ('The SQLite -wal file is very large (' + str(_wal_mb6324)
-                         + ' MB). Run `python3 cleanup_disk.py --apply --vacuum` '
-                         'in the Bash console, or --repair if writes keep failing.')
+                         + ' MB). Close other dashboard processes and retry.')
     elif out['action_required']:
-        out['advice'] = ('Disk almost full. The dashboard drops the lost_and_found '
-                         'recovery table automatically when free space is under '
-                         '150 MB and trims DB backups. For a deeper clean run: '
-                         'python3 cleanup_disk.py --apply --vacuum (Bash console).')
+        out['advice'] = ('Local storage is low. Free space on this PC before '
+                         'running another import.' if desktop_mode else
+                         'Server storage is low. Contact the server administrator.')
     else:
         out['advice'] = ''
 
