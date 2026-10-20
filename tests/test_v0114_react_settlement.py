@@ -71,8 +71,8 @@ class ReactSettlementTests(unittest.TestCase):
     def test_no_data_or_installer_requirement_changed(self):
         installer = (ROOT/'installer.iss').read_text('utf-8')
         build = (ROOT/'build_windows.bat').read_text('utf-8')
-        self.assertIn('0.1.14-preview', installer)
-        self.assertIn('ServeoneDashboard-Desktop-Setup-V0.1.14', installer)
+        self.assertIn('1.0.0', installer)
+        self.assertIn('ServeoneDashboard-Setup-V1.0.0', installer)
         self.assertIn('desktop_launcher.py', build)
         self.assertIn("@('instance','__pycache__')", build)
         self.assertIn("@('.db','.sqlite','.sqlite3','.dpapi')", build)

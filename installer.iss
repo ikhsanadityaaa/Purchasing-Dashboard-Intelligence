@@ -1,8 +1,8 @@
-; Offline-first prerequisites for Serveone Dashboard Desktop V0.1.14
+; Offline-first prerequisites for Serveone Dashboard Desktop V1.0.0
 ; Build: build_windows.bat (includes signed WebView2 Evergreen Standalone x64).
 ; The WebView2 runtime is sourced from Microsoft at BUILD time only.
 #define MyAppName "Serveone Dashboard"
-#define MyAppVersion "0.1.14-preview"
+#define MyAppVersion "1.0.0"
 #define MyAppExeName "ServeoneDashboard.exe"
 #ifnexist "vendor\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
   #error "Missing OFFLINE WebView2 Runtime. Run build_installer_windows.bat."
@@ -14,7 +14,7 @@ AppVersion={#MyAppVersion}
 DefaultDirName={localappdata}\Programs\Serveone Dashboard
 DefaultGroupName={#MyAppName}
 OutputDir=installer_output
-OutputBaseFilename=ServeoneDashboard-Desktop-Setup-V0.1.14
+OutputBaseFilename=ServeoneDashboard-Setup-V1.0.0
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=lowest

@@ -55,5 +55,8 @@ class V013Tests(unittest.TestCase):
             self.assertIn(module,requirements)
         for module in ('psutil','pyautogui','pygetwindow','pyperclip','pywinauto','win32com.client'):
             self.assertIn(module,build)
+        self.assertIn('build_automation=',build)
+        self.assertIn('--add-data "%build_automation%;automation"',build)
+        self.assertNotIn('--add-data "automation;automation"',build)
 
 if __name__=='__main__':unittest.main()
