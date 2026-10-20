@@ -75,6 +75,10 @@ class AutoUpdate0115Tests(unittest.TestCase):
             offset = 0
             runtime.log('INFO VPN terhubung')
             self.assertEqual('SQLite parameter limit exceeded while matching Product IDs', runtime._failure_reason(offset, 1))
+            runtime.clear_log()
+            runtime.log('Traceback (most recent call last):')
+            runtime.log('RuntimeError: Another automation process is already running')
+            self.assertEqual('Another automation process is already running', runtime._failure_reason(0, 1))
 
     def test_product_id_lookup_is_batched_below_sqlite_parameter_limit(self):
         backend = (ROOT / 'dashboard/app.py').read_text(encoding='utf-8')

@@ -400,6 +400,7 @@ class DesktopRuntime:
             lines=[self._clean_log_line(x).strip() for x in fragment.splitlines() if x.strip()]
             lines=[x for x in lines if not ('blob:' in x.lower() or '[browser blob URL]' in x)]
             def error_score(value):
+                if re.search(r'(?i)\b(?:Runtime|Permission|Operational|Value|FileNotFound)Error:',value):return 4
                 if re.search(r'(?i)(traceback|exception|\bERROR\b|sqlite|too many sql variables)',value):return 3
                 if re.search(r'(?i)(failed|gagal|HTTP [45]\d\d|denied|timeout|not found|invalid|required|refused|permission)',value):return 2
                 if re.search(r'(?i)vpn.*(not connected|disconnected|failed|required)',value):return 1
@@ -408,6 +409,8 @@ class DesktopRuntime:
             detail=(max(candidates)[2] if candidates else (lines[-1] if lines else '')).strip()
             if 'too many sql variables' in detail.lower():
                 detail='SQLite parameter limit exceeded while matching Product IDs'
+            elif 'another automation process is already running' in detail.lower():
+                detail='Another automation process is already running'
             return (detail[:240] if detail else f'Worker exited with code {exit_code}; open Activity Log for details')
         except (OSError,UnicodeError):
             return f'Worker exited with code {exit_code}; log unavailable'
