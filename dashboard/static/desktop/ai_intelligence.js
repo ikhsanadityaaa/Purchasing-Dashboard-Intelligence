@@ -25,8 +25,8 @@ function ensureNav(){
   var aside=document.querySelector('aside.nav-side');if(!aside)return;
   if(aside.querySelector('[data-ai-nav]')){setNavActive(isRoute());return}
   var sample=aside.querySelector('a[href]');if(!sample)return;
-  var link=document.createElement('a');link.href=PATH;link.className=sample.className;link.setAttribute('data-ai-nav','1');link.setAttribute('aria-label','AI Intelligence');
-  link.innerHTML=icons.ai+'<span class="nav-label">AI Intelligence</span>';
+  var link=document.createElement('a');link.href=PATH;link.className=sample.className;link.setAttribute('data-ai-nav','1');link.setAttribute('aria-label','AI Intelligence');link.title='AI Intelligence';
+  link.innerHTML=icons.ai+'<span class="hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 nav-label">AI Intelligence</span>';
   var more=Array.prototype.find.call(aside.querySelectorAll('a,button'),function(el){return /more/i.test(el.textContent||'')});
   (more&&more.parentNode===sample.parentNode?more.parentNode:sample.parentNode).insertBefore(link,more&&more.parentNode===sample.parentNode?more:null);
   link.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();navigate()});
