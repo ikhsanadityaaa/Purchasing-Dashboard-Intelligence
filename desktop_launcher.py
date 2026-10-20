@@ -133,7 +133,9 @@ def main():
     os.environ['DASHBOARD_POST_UPLOAD_WARMUP']='0'
     if args.worker:
         from worker_lock import run_exclusive
-        run_exclusive(lambda:run_worker(args.worker))
+        run_exclusive(
+            lambda:run_worker(args.worker),
+            on_wait=lambda:print('ACTIVITY Waiting for current automation to finish',flush=True))
         return
     if args.import_db:
         import_existing_db(args.import_db,data/'instance'/'po_database.db')
