@@ -1,0 +1,67 @@
+/* Minimal footer status; never blocks the analytics table or triggers full-screen loading. */
+#zd-sheets-status{display:none!important}
+#zd-sheets-status{position:fixed;right:18px;bottom:18px;z-index:7000;box-sizing:border-box;max-width:min(700px,calc(100vw - 36px));display:flex;align-items:center;gap:10px;padding:9px 12px;background:#fff;border:1px solid #dbe2eb;border-radius:8px;box-shadow:0 3px 16px rgba(15,23,42,.12);font:500 12px/1.4 system-ui,'Segoe UI',sans-serif;color:#334155}
+#zd-sheets-status .zd-sheets-dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:#64748b}
+#zd-sheets-status[data-state=syncing] .zd-sheets-dot{background:#2563eb;animation:zd-sheets-pulse 1s ease-in-out infinite}
+#zd-sheets-status[data-state=completed] .zd-sheets-dot{background:#16a34a}
+#zd-sheets-status[data-state=error] .zd-sheets-dot,#zd-sheets-status[data-state=needs_credentials] .zd-sheets-dot,#zd-sheets-status[data-state=warning] .zd-sheets-dot{background:#d97706}
+#zd-sheets-status .zd-sheets-label{min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:460px}
+#zd-sheets-status .zd-sheets-btn{white-space:nowrap;cursor:pointer;border:1px solid #cbd5e1;background:#f8fafc;color:#334155;border-radius:6px;padding:5px 8px;font:600 11px/1.3 system-ui,'Segoe UI',sans-serif}
+#zd-sheets-status .zd-sheets-btn:hover{background:#e2e8f0}
+#zd-sheets-status .zd-sheets-btn:disabled{opacity:.55;cursor:wait}
+@keyframes zd-sheets-pulse{50%{opacity:.3}}
+@media(max-width:640px){#zd-sheets-status{right:8px;bottom:8px;max-width:calc(100vw - 16px)}#zd-sheets-status .zd-sheets-label{max-width:145px}}
+
+.zd-google-more-wrap{position:relative;flex:none}
+.zd-google-more-trigger{display:inline-flex;align-items:center;min-height:40px;padding:8px 12px;border:1px solid #d1d5db;border-radius:12px;background:#fff;color:#374151;font:600 14px/20px system-ui,'Segoe UI',sans-serif;cursor:pointer;box-shadow:0 1px 2px rgba(15,23,42,.05)}
+.zd-google-more-trigger:hover{background:#f9fafb}
+.zd-google-more-trigger:focus-visible,.zd-google-menu-item:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
+.zd-google-owned-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:9999;width:240px;border:1px solid #d1d5db;border-radius:12px;background:#fff;box-shadow:0 14px 36px rgba(15,23,42,.18);overflow:hidden}
+.zd-google-owned-menu[hidden]{display:none!important}
+.zd-google-menu-actions{border-top:1px solid #e5e7eb}
+.zd-google-menu-status{padding:9px 12px;color:#64748b;background:#f8fafc;font:500 11px/1.4 system-ui,'Segoe UI',sans-serif;overflow-wrap:anywhere}
+.zd-google-menu-status[data-state=error],.zd-google-menu-status[data-state=warning]{color:#b45309}
+.zd-google-menu-status[data-state=completed]{color:#15803d}
+.zd-google-menu-item{display:block;width:100%;min-height:40px;padding:9px 12px;border:0;background:#fff;color:#374151;text-align:left;font:600 13px/1.4 system-ui,'Segoe UI',sans-serif;cursor:pointer}
+.zd-google-menu-item:hover{background:#eff6ff;color:#1d4ed8}
+html.dark .zd-google-more-trigger,html.dark .zd-google-owned-menu,html.dark .zd-google-menu-item{background:#374151;border-color:#4b5563;color:#f3f4f6}
+html.dark .zd-google-menu-status{background:#1f2937;color:#d1d5db}
+html.dark .zd-google-menu-item:hover{background:#4b5563;color:#fff}
+
+/* OAuth Desktop setup: JSON import and manual credentials share one compact form. */
+#zd-google-setup-overlay[hidden]{display:none!important}
+#zd-google-setup-overlay{position:fixed;inset:0;z-index:1000100;background:rgba(15,23,42,.52);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font:400 13px/1.5 system-ui,'Segoe UI',sans-serif;color:#1e293b}
+.zd-google-setup-dialog{width:min(650px,100%);max-height:calc(100vh - 32px);display:flex;flex-direction:column;background:#fff;border:1px solid #dce4ed;border-radius:14px;box-shadow:0 20px 70px #0f172a55;overflow:hidden}
+.zd-google-setup-header{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;padding:20px 24px 16px;border-bottom:1px solid #e2e8f0}
+.zd-google-setup-header h2{font-size:19px;font-weight:700;line-height:1.3;margin:0 0 5px}
+.zd-google-setup-header p{color:#64748b;margin:0}
+.zd-google-close{border:0;background:#f1f5f9;border-radius:8px;font-size:24px;color:#475569;width:34px;height:34px;cursor:pointer;flex-shrink:0}
+.zd-google-setup-body{overflow-y:auto;min-height:0;padding:20px 24px 24px}
+.zd-google-steps{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px}
+.zd-google-steps ol{padding-left:24px;margin:8px 0 0;list-style:decimal outside}
+.zd-google-steps li{margin:5px 0}
+.zd-google-steps a{color:#1d4ed8;text-decoration:underline}
+.zd-google-existing{margin:14px 0;padding:10px 12px;border-radius:8px;background:#eff6ff;color:#1e40af}
+#zd-google-client-form{display:flex;flex-direction:column;gap:7px;margin-top:16px}
+#zd-google-client-form label{font-weight:650;margin-top:8px}
+#zd-google-client-form input{border:1px solid #cbd5e1;border-radius:8px;padding:11px 12px;font:500 13px system-ui,'Segoe UI',sans-serif;color:#0f172a;background:#fff;width:100%;box-sizing:border-box}
+#zd-google-client-form input:focus{outline:2px solid #93c5fd;outline-offset:1px}
+#zd-google-client-form input[type=file]{padding:8px;background:#f8fafc;cursor:pointer}
+.zd-google-divider{display:flex;align-items:center;gap:10px;margin:10px 0 2px;color:#64748b;font-size:12px}
+.zd-google-divider::before,.zd-google-divider::after{content:"";height:1px;background:#e2e8f0;flex:1}
+.zd-google-note{font-size:12px;color:#64748b;margin:10px 0 0}
+.zd-google-modal-status{min-height:20px;color:#475569;margin:3px 0}
+.zd-google-modal-status[data-kind=error]{color:#b91c1c}
+.zd-google-modal-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;margin-top:8px}
+.zd-google-modal-actions button{cursor:pointer;font:650 12px system-ui,'Segoe UI',sans-serif;border-radius:8px;padding:11px 13px;border:1px solid #cbd5e1}
+.zd-google-secondary{color:#334155;background:#fff}
+.zd-google-primary{color:#fff;background:#2563eb;border-color:#2563eb!important}
+.zd-google-modal-actions button:disabled{opacity:.5;cursor:wait}
+.zd-google-modal-actions [hidden]{display:none!important}
+html.dark .zd-google-setup-dialog{background:#1f2937;border-color:#4b5563;color:#f3f4f6}
+html.dark .zd-google-setup-header{border-color:#4b5563}
+html.dark .zd-google-setup-header p,html.dark .zd-google-note,html.dark .zd-google-divider{color:#cbd5e1}
+html.dark .zd-google-steps,html.dark #zd-google-client-form input[type=file]{background:#111827;border-color:#4b5563}
+html.dark #zd-google-client-form input{background:#374151;border-color:#6b7280;color:#fff}
+html.dark .zd-google-divider::before,html.dark .zd-google-divider::after{background:#4b5563}
+@media(max-width:640px){.zd-google-setup-header{padding:16px}.zd-google-setup-body{padding:14px}}

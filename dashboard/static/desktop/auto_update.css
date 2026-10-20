@@ -1,0 +1,131 @@
+#z-auto-update-btn{position:absolute!important;z-index:6;display:inline-flex!important;align-items:center;justify-content:center;gap:7px;white-space:nowrap;min-width:123px!important;cursor:pointer;background:#f8fafc!important;color:#344054!important;border:1px solid #d0d5dd!important;border-radius:9px!important;box-shadow:none!important;font-weight:650!important;font-size:12px!important}
+#z-auto-update-btn:hover,#z-auto-update-btn:focus-visible{background:#eff6ff!important;color:#1d4ed8!important;border-color:#93c5fd!important}
+#z-auto-update-btn svg{width:15px;height:15px}
+#z-desktop-shade{position:fixed;inset:0;background:rgba(15,23,42,.52);z-index:2147482500;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Inter,'Segoe UI',sans-serif;color:#192536}
+#z-desktop-shade[hidden]{display:none!important}
+#z-desktop-panel{background:#fff;width:min(950px,100%);max-height:min(790px,96vh);border:1px solid #dfe5ed;border-radius:18px;box-shadow:0 24px 72px rgba(15,23,42,.26);overflow:hidden;display:flex;flex-direction:column}
+#z-desktop-panel *{box-sizing:border-box}
+#z-desktop-panel .zd-top{display:flex;align-items:center;justify-content:space-between;padding:18px 23px;border-bottom:1px solid #e7eaf0;gap:12px}
+#z-desktop-panel .zd-title{font-size:19px;font-weight:790;letter-spacing:-.4px}
+#z-desktop-panel .zd-sub{font-size:12px;color:#667085;margin-top:4px}
+#z-desktop-panel .zd-close{border:0;background:#f2f4f7;border-radius:8px;width:34px;height:34px;cursor:pointer;font-size:23px;color:#667085}
+#z-desktop-panel .zd-body{padding:21px 23px;overflow-y:auto;display:grid;gap:18px;min-height:0}
+#z-desktop-panel .zd-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+#z-desktop-panel .zd-section{font-size:13px;font-weight:780;margin:0 0 10px}
+#z-desktop-panel .zd-muted{font-size:12px;color:#667085;line-height:1.5}
+#z-desktop-panel .zd-pill{font-size:11px;font-weight:690;color:#065f46;background:#ecfdf3;border:1px solid #a6f4c5;border-radius:999px;padding:5px 10px}
+#z-desktop-panel .zd-processes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+#z-desktop-panel .zd-process{padding:12px 13px;border:1px solid #e4e7ec;border-radius:11px;background:#fbfcfe;display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+#z-desktop-panel .zd-process strong{font-size:12px}
+#z-desktop-panel .zd-btn{background:#2563eb;border:1px solid #2563eb;border-radius:8px;padding:9px 12px;color:white;font-size:12px;font-weight:740;cursor:pointer;white-space:nowrap}
+#z-desktop-panel .zd-btn:disabled{cursor:not-allowed;opacity:.5}
+#z-desktop-panel .zd-btn.secondary{background:#fff;color:#344054;border-color:#d0d5dd}
+#z-desktop-panel .zd-btn:hover:not(:disabled){filter:brightness(.93)}
+#z-desktop-panel .zd-settings{background:#f8fafc;border:1px solid #e4e7ec;padding:16px;border-radius:12px}
+#z-desktop-panel .zd-fields{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-top:12px}
+#z-desktop-panel label.zd-field{font-size:11px;font-weight:740;color:#475467;display:flex;flex-direction:column;gap:6px;min-width:0}
+#z-desktop-panel select,#z-desktop-panel input[type="date"],#z-desktop-panel input[type="time"],#z-desktop-panel input[type="number"]{width:100%;min-height:36px;padding:7px;border-radius:8px;border:1px solid #d0d5dd;background:#fff;color:#182230;font:500 12px Inter,'Segoe UI',sans-serif}
+#z-desktop-panel .zd-days{margin-top:10px;display:flex;flex-wrap:wrap;gap:7px}
+#z-desktop-panel .zd-day{display:flex;align-items:center;gap:4px;padding:6px 9px;background:#fff;border:1px solid #e4e7ec;border-radius:7px;font-size:11px}
+#z-desktop-panel .zd-list{border:1px solid #e4e7ec;border-radius:10px;overflow:hidden;margin-top:10px}
+#z-desktop-panel .zd-schedule{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 13px;border-bottom:1px solid #e7eaf0;font-size:12px}
+#z-desktop-panel .zd-schedule:last-child{border:0}
+#z-desktop-panel .zd-foot{border-top:1px solid #e7eaf0;padding:13px 23px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+#z-desktop-panel .zd-status{font-size:12px;color:#667085;min-height:18px}
+#z-desktop-panel .zd-logs{background:#101828;color:#d0d5dd;border-radius:9px;max-height:125px;min-height:70px;overflow:auto;padding:12px;font:11px/1.55 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+#z-desktop-panel .zd-error{color:#b42318;font-weight:600}
+#z-desktop-panel .zd-toggle{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:700}
+#z-desktop-panel .zd-warning{padding:10px 12px;background:#fffaeb;border:1px solid #fedf89;border-radius:9px;color:#92400e;font-size:11px;line-height:1.5}
+@media(max-width:800px){#z-desktop-panel .zd-processes{grid-template-columns:1fr}#z-desktop-panel .zd-fields{grid-template-columns:repeat(2,1fr)}#z-desktop-shade{padding:8px}#z-desktop-panel .zd-top,#z-desktop-panel .zd-body,#z-desktop-panel .zd-foot{padding:13px}}
+#z-desktop-panel [hidden]{display:none!important}
+/* V0.1.4: Processes, Scheduler and Activity separated into proper tabs. */
+#z-desktop-panel{width:min(1080px,100%);max-height:min(860px,96vh)}
+#z-desktop-panel .zd-tabs{display:flex;align-items:center;gap:4px;border-bottom:1px solid #e4e7ec;padding:0 22px}
+#z-desktop-panel .zd-tab{background:none;border:0;border-bottom:2px solid transparent;font:700 12px 'Segoe UI',sans-serif;color:#667085;padding:13px 18px;cursor:pointer}
+#z-desktop-panel .zd-tab.active{color:#2459db;border-bottom-color:#2563eb}
+#z-desktop-panel .zd-tab-status{margin-left:auto}
+#z-desktop-panel .zd-page{display:grid;gap:16px;min-height:0}
+#z-desktop-panel .zd-body{display:block;flex:1;overflow-y:auto;min-height:0;padding:18px 24px}
+#z-desktop-panel .zd-page[hidden]{display:none!important}
+#z-desktop-panel .zd-panel{background:#f8fafc;border:1px solid #e4e7ec;padding:16px;border-radius:12px}
+#z-desktop-panel .zd-control-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+#z-desktop-panel .zd-credential-fields{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end;margin-top:14px}
+#z-desktop-panel .zd-field{display:flex;flex-direction:column;gap:6px;font-size:11px;font-weight:700;color:#475467;min-width:0}
+#z-desktop-panel .zd-field input,#z-desktop-panel .zd-field select{height:37px;width:100%;padding:7px 10px;border-radius:8px;border:1px solid #d0d5dd;background:white;color:#182230;font:500 12px 'Segoe UI',sans-serif}
+#z-desktop-panel .zd-field label{font-size:11px}
+#z-desktop-panel .zd-hint{font-weight:400;color:#98a2b3}
+#z-desktop-panel .zd-smallstatus{font-size:11px;background:white;border:1px solid #d0d5dd;border-radius:99px;padding:5px 10px;color:#475467}
+#z-desktop-panel .zd-password-wrap{position:relative}
+#z-desktop-panel .zd-password-wrap input{padding-right:60px}
+#z-desktop-panel .zd-eye{position:absolute;right:6px;top:4px;padding:5px 7px;background:none;border:0;color:#475467;font-size:11px;cursor:pointer}
+#z-desktop-panel .zd-processes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+#z-desktop-panel .zd-process{display:block;background:#fff;padding:14px;align-items:stretch}
+#z-desktop-panel .zd-process-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+#z-desktop-panel .zd-process-top strong{font-size:12px}
+#z-desktop-panel .zd-range-editor{display:grid;gap:9px}
+#z-desktop-panel .zd-custom-fields{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+#z-desktop-panel .zd-custom-fields[hidden]{display:none!important}
+#z-desktop-panel .zd-run-all{text-align:right}
+#z-desktop-panel .zd-task-toggle{padding:10px 0;border-top:1px solid #e4e7ec;margin-top:13px;font-weight:600}
+#z-desktop-panel .zd-fields{grid-template-columns:repeat(4,minmax(0,1fr))}
+#z-desktop-panel .zd-schedule-range{margin-top:14px}
+#z-desktop-panel .zd-schedule-range .zd-range-editor{grid-template-columns:minmax(160px,1fr) 2fr;align-items:end}
+#z-desktop-panel .zd-add-schedule{margin-top:13px}
+#z-desktop-panel .zd-list{margin-top:0;border:0;display:grid;gap:8px;overflow:visible}
+#z-desktop-panel .zd-schedule{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:12px 14px}
+#z-desktop-panel .zd-clock{width:36px;height:36px;border-radius:10px;background:#eff6ff;color:#2563eb;display:flex;align-items:center;justify-content:center;flex:none}
+#z-desktop-panel .zd-clock svg{width:21px;height:21px}
+#z-desktop-panel .zd-schedule-text{flex:1;min-width:0}
+#z-desktop-panel .zd-schedule-text strong{font-size:12px}
+#z-desktop-panel .zd-empty{padding:20px;color:#667085;text-align:center;border:1px dashed #d0d5dd;border-radius:10px;font-size:12px}
+#z-desktop-panel .zd-logs{max-height:300px;height:min(300px,42vh);min-height:180px;margin-top:10px;overflow-y:auto;white-space:pre-wrap;font-size:12px}
+#z-desktop-panel .zd-log-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+#z-desktop-panel .zd-pill-error{background:#fef3f2;border-color:#fecdca;color:#b42318}
+#z-desktop-panel .zd-foot{background:white}
+#z-desktop-panel .zd-foot-actions{display:flex;gap:8px}
+@media(max-width:850px){#z-desktop-panel .zd-processes{grid-template-columns:1fr}#z-desktop-panel .zd-credential-fields{grid-template-columns:1fr}#z-desktop-panel .zd-fields{grid-template-columns:repeat(2,1fr)}#z-desktop-panel .zd-schedule-range .zd-range-editor{grid-template-columns:1fr}#z-desktop-panel .zd-body{padding:13px}#z-desktop-panel .zd-tabs{padding:0 10px}}
+
+/* V0.1.5: active job visibly spins in the process being executed */
+#z-desktop-panel .zd-process-active{border-color:#93c5fd;background:#eff6ff}
+#z-desktop-panel .zd-spinner{display:inline-block;vertical-align:-2px;width:13px;height:13px;margin-right:5px;border:2px solid rgba(37,99,235,.25);border-top-color:#2563eb;border-radius:50%;animation:zd-spin .7s linear infinite}
+@keyframes zd-spin{to{transform:rotate(360deg)}}
+
+#z-desktop-panel .zd-local-data-result{margin-top:11px;border-radius:9px;border:1px solid #bfdbfe;background:#eff6ff;color:#1e40af;padding:11px 13px;font-size:12px;line-height:1.6}
+#z-desktop-panel .zd-local-data-result[hidden]{display:none!important}
+
+/* v0.1.6 Run All: all steps queued/spinning then individual result badges. */
+#z-desktop-panel .zd-process-waiting {border-color:#bfdbfe;background:#eff6ff}
+#z-desktop-panel .zd-process-success {border-color:#86efac;background:#f0fdf4}
+#z-desktop-panel .zd-process-failed {border-color:#fca5a5;background:#fef2f2}
+#z-desktop-panel .zd-step-status{min-height:36px;font-size:11px;font-weight:650;line-height:18px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+#z-desktop-panel .zd-step-running,#z-desktop-panel .zd-step-queued{color:#1d4ed8}
+#z-desktop-panel .zd-step-completed{color:#15803d}
+#z-desktop-panel .zd-step-failed{color:#b91c1c}
+#z-desktop-panel .zd-process-success .zd-process-top strong{color:#15803d}
+
+/* V0.1.7: header buttons use normal flex flow and identical heights. */
+#z-auto-update-btn.zd-header-auto{
+ position:static!important;inset:auto!important;transform:none!important;
+ box-sizing:border-box!important;display:inline-flex!important;align-items:center!important;
+ justify-content:center!important;flex:0 0 auto!important;gap:8px!important;
+ min-width:0!important;white-space:nowrap!important;
+ padding:10px 16px!important;border-radius:12px!important;
+ background:#f8fafc!important;color:#344054!important;
+ border:1px solid #cbd5e1!important;box-shadow:0 1px 2px rgba(16,24,40,.06)!important;
+ font:500 14px/20px Inter,'Segoe UI',sans-serif!important;letter-spacing:0!important;
+}
+#z-auto-update-btn.zd-header-auto svg{width:16px!important;height:16px!important;flex:none!important;stroke:currentColor!important}
+#z-auto-update-btn.zd-header-auto:hover{background:#eff6ff!important;color:#1d4ed8!important;border-color:#93c5fd!important}
+
+#z-desktop-panel .zd-schedule-range-hint{margin-top:14px;font-size:12px;color:#475467;background:#eff6ff;border:1px solid #bfdbfe;padding:12px 14px;border-radius:9px}
+
+/* Desktop V0.1.11 - stop and inline error detail. */
+#z-desktop-panel .zd-btn.zd-stop{background:#dc2626;color:#fff;border:1px solid #dc2626}
+#z-desktop-panel .zd-btn.zd-stop:hover:not(:disabled){background:#b91c1c;border-color:#b91c1c}
+#z-desktop-panel .zd-log-line{white-space:pre-wrap}
+#z-desktop-panel .zd-log-success{color:#15803d;font-weight:700}
+#z-desktop-panel .zd-log-error{color:#b91c1c;font-weight:700}
+#z-desktop-panel .zd-log-stopped{color:#b45309;font-weight:700}
+#z-desktop-panel .zd-step-failed{overflow-wrap:anywhere;line-height:1.5}
+#z-desktop-panel .zd-step-cancelled{color:#667085}
+#z-desktop-panel .zd-process[data-process] .zd-step-status{max-width:100%}

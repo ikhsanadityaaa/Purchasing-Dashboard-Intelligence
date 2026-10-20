@@ -1,0 +1,32 @@
+.venv/
+build/
+dist/
+.test-tmp/
+__pycache__/
+*.py[cod]
+
+# Local runtime data and generated reports/uploads.
+dashboard/instance/
+dashboard/logs/
+automation/failed_uploads_*/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+
+# Local credentials and machine-specific configuration.
+.env
+.env.*
+!.env.example
+client_secret*.json
+credentials*.json
+token*.json
+*.dpapi
+
+# Editor and OS metadata.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

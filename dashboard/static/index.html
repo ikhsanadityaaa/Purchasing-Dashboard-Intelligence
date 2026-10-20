@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/desktop/app-icon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Serveone Dashboard</title>
+    <!-- UI patch V63.27.69: remove duplicate page titles -->
+    <link rel="stylesheet" crossorigin href="/assets/index-B3s0RcPA.css?v=6400">
+    <!-- V0.1.14: native React summary Pending Settlement styles. -->
+    <link rel="stylesheet" href="/desktop/pending_settlement_react.css?v=14">
+    <style>
+/* ── V61.1 UX FIX: SATU indikator loading kecil di TENGAH layar ──
+   Loader bawaan app (pill "Loading..." & overlay "Memuat ...") disembunyikan
+   via selector di bawah agar tidak dobel; digantikan satu toast kecil terpusat. */
+#z-loading-toast{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;display:none;align-items:center;gap:8px;background:#2563eb;color:#fff;padding:8px 16px;border-radius:9999px;box-shadow:0 6px 20px rgba(0,0,0,.28);font:600 12px/1.3 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;letter-spacing:.01em;pointer-events:none;max-width:280px;white-space:nowrap}
+#z-loading-toast.z-show{display:flex!important} /* Re-enable loading indicator for actual page fetches */
+#z-loading-toast .z-spin{width:13px;height:13px;flex:0 0 13px;border-radius:50%;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;animation:z-spin .8s linear infinite}
+@keyframes z-spin{to{transform:rotate(360deg)}}
+/* Sembunyikan loader bawaan aplikasi (V61.1 - digantikan toast terpusat):
+   1) pill "Loading..." kecil (top-1/2 left-1/2 z-[9998] bg-blue-600)
+   2) overlay gelap "Memuat ..." (inset-0 bg-black/50 z-[9999])
+   Modal (bg-black/60) dan notifikasi TIDAK ikut disembunyikan. */
+div.fixed.top-1\/2.left-1\/2.z-\[9998\].bg-blue-600{display:none!important}
+div.fixed.inset-0.bg-black\/50.z-\[9999\]{display:none!important}
+/* V62.5 (antislop R-32): indikator fokus keyboard yang selalu terlihat.
+   Outline biru (blue-600, warna primer app) hanya muncul pada navigasi keyboard
+   (:focus-visible), jadi klik mouse tetap bersih tanpa outline. */
+:focus-visible{outline:2px solid #2563eb!important;outline-offset:2px!important}
+/* Desktop: keep sidebar OVER every floating table header/frozen column (9993/9994),
+   yet UNDER dialogs (9999+) and full-screen Auto Update overlay. */
+#root{--nav-collapsed:3.5rem;--nav-expanded:13rem}
+#root aside.nav-side {position:fixed!important;z-index:9996!important;isolation:isolate!important}
+#root main{margin-left:var(--nav-collapsed)!important}
+/* ── V62.7: sidebar expand murni CSS (hover/focus-within) ──
+   Tanpa state React: tidak bisa "nyangkut" terbuka (bug side panel auto muncul),
+   tidak ada re-render App saat hover (animasi mulus), ada delay intent 120ms
+   agar sentuhan singkat tidak memunculkan panel. */
+.nav-side{width:var(--nav-collapsed)!important;transition-delay:0s}
+.nav-side:hover,.nav-side:focus-within{width:var(--nav-expanded)!important;transition-delay:.12s}
+.nav-side>nav,.nav-side>div{padding-left:.375rem!important;padding-right:.375rem!important}
+.nav-side a,.nav-side button{padding:.625rem!important}
+.nav-label{max-width:0;opacity:0}
+.nav-side:hover .nav-label,.nav-side:focus-within .nav-label{max-width:9rem;opacity:1;transition-delay:.12s}
+/* Compact sidebar: reuse menu labels as fast hover/focus tooltips. */
+@media (max-width:1023px){
+  .nav-side,.nav-side:hover,.nav-side:focus-within{width:var(--nav-collapsed)!important;overflow:visible!important;transition-delay:0s}
+  .nav-side a,.nav-side button{position:relative}
+  .nav-side .nav-label{display:block!important;position:absolute;left:calc(100% + 10px);top:50%;z-index:10010;max-width:none!important;padding:7px 10px;border-radius:8px;background:#1f2937;color:#fff;box-shadow:0 6px 18px rgba(15,23,42,.2);font:600 12px/1.2 Inter,'Segoe UI',sans-serif;opacity:0;pointer-events:none;transform:translate(4px,-50%);transition:opacity .08s ease,transform .08s ease;transition-delay:0s!important}
+  .nav-side:hover .nav-label,.nav-side:focus-within .nav-label{opacity:0}
+  .nav-side a:hover .nav-label,.nav-side a:focus-visible .nav-label,.nav-side button:hover .nav-label,.nav-side button:focus-visible .nav-label{opacity:1;transform:translate(0,-50%);transition-delay:.04s!important}
+}
+/* ── V62.7: skeleton shell instan sebelum JS siap (mengurangi load terasa putih) ── */
+@keyframes zspin{to{transform:rotate(360deg)}}
+#z-shell{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#fbfbfa;z-index:1}
+    /* V63.9: grid KPI Settlement 6 kolom (kartu Settled PO baru) - kelas xl:grid-cols-6
+   tidak ter-compile di CSS bawaan, jadi dipasok via kelas kustom ini. */
+@media (min-width:1280px){.xl-kpi6-v95{grid-template-columns:repeat(6,minmax(0,1fr))}}
+</style>
+  
+<script defer src="/desktop/sheet_sync.js?v=19"></script>
+<link rel="stylesheet" href="/desktop/sheet_sync.css?v=19">
+<script type="module" src="/assets/index-C9BxB1mr.js?v=desktop-24"></script>
+
+  
+
+  <link rel="stylesheet" href="/desktop/auto_update.css?v=19">
+<script defer src="/desktop/live_data.js?v=11"></script>
+<link rel="stylesheet" href="/desktop/display_controls.css?v=5">
+  <link rel="stylesheet" href="/desktop/database_notice.css?v=2">
+  <link rel="stylesheet" href="/desktop/reports.css?v=9">
+  <link rel="stylesheet" href="/desktop/ai_intelligence.css?v=9">
+</head>
+  <body>
+    <div id="root"><div id="z-shell"><div style="width:26px;height:26px;border-radius:50%;border:3px solid #dbeafe;border-top-color:#2563eb;animation:zspin .8s linear infinite"></div></div></div>
+    <script>
+(function(){
+'use strict';
+/* ════════════════════════════════════════════════════════════════════════
+   V61.1 UX FIX #1 - SATU indikator loading kecil di tengah layar.
+   Loader bawaan app ("Loading page") disembunyikan via CSS di atas;
+   semua feedback loading kini lewat toast terpusat ini saja.
+   Intercept XMLHttpRequest (axios) + fetch. Jika ada request yang berjalan
+   lebih dari 500 ms, munculkan toast "Memuat..." kecil di tengah layar.
+   Request cepat (< 500 ms) tidak menampilkan apa pun, jadi UI tidak berisik.
+   ════════════════════════════════════════════════════════════════════════ */
+var SHOW_DELAY = 500;   // ms sebelum toast muncul
+var MIN_SHOW   = 600;   // durasi minimal tampil supaya tidak berkedip
+var HIDE_GRACE = 200;   // jeda setelah semua selesai sebelum disembunyikan
+var inflight = 0, toast = null, textEl = null;
+var showTimer = null, hideTimer = null, shownAt = 0;
+
+function ensureToast(){
+  if (toast) return;
+  toast = document.createElement('div');
+  toast.id = 'z-loading-toast';
+  var spin = document.createElement('span');
+  spin.className = 'z-spin';
+  textEl = document.createElement('span');
+  textEl.id = 'z-loading-text';
+  toast.appendChild(spin);
+  toast.appendChild(textEl);
+  document.body.appendChild(toast);
+}
+function renderText(){
+  if (!textEl) return;
+  if (jobText){ textEl.textContent = jobText; return; }
+  textEl.textContent = 'Loading' + (inflight > 1 ? ' (' + inflight + ')' : '') + '\u2026';
+}
+function requestStarted(){
+  inflight++;
+  if (hideTimer){ clearTimeout(hideTimer); hideTimer = null; }
+  if (inflight === 1){
+    if (showTimer) clearTimeout(showTimer);
+    showTimer = setTimeout(function(){
+      showTimer = null;
+      if (inflight > 0){
+        ensureToast();
+        renderText();
+        toast.classList.add('z-show');
+        shownAt = Date.now();
+      }
+    }, SHOW_DELAY);
+  } else if (toast && toast.classList.contains('z-show')){
+    renderText();
+  }
+}
+function requestFinished(){
+  inflight = Math.max(0, inflight - 1);
+  if (inflight > 0) return;
+  if (showTimer){ clearTimeout(showTimer); showTimer = null; }
+  if (hideTimer) clearTimeout(hideTimer);
+  hideTimer = setTimeout(function(){
+    hideTimer = null;
+    if (jobText) return; /* V61.5: pill dipin job upload - tetap tampil */
+    if (inflight === 0 && toast && toast.classList.contains('z-show')){
+      var wait = MIN_SHOW - (Date.now() - shownAt);
+      if (wait > 0){
+        hideTimer = setTimeout(function(){
+          if (inflight === 0 && !jobText && toast) toast.classList.remove('z-show');
+        }, wait);
+      } else {
+        toast.classList.remove('z-show');
+      }
+    }
+  }, HIDE_GRACE);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   V61.5 - UPLOAD DI BACKGROUND: poll status job + pill "Memproses".
+   Backend membalas 202 + job_id untuk upload besar; file diproses worker
+   background sehingga SEMUA halaman tetap cepat selama proses. Helper ini
+   menunggu sampai selesai lalu me-return response final, sehingga alur
+   toast sukses/refetch data di app berjalan persis seperti sebelumnya.
+   ════════════════════════════════════════════════════════════════════════ */
+var jobText = null;
+
+window.__jobPill = function (t){
+  if (t){
+    jobText = t;
+    ensureToast();
+    renderText();
+    if (toast){
+      toast.classList.add('z-show');
+      shownAt = Date.now();
+    }
+    if (showTimer){ clearTimeout(showTimer); showTimer = null; }
+    if (hideTimer){ clearTimeout(hideTimer); hideTimer = null; }
+  } else {
+    jobText = null;
+    if (inflight === 0 && toast){
+      renderText();
+      toast.classList.remove('z-show');
+    }
+  }
+};
+
+window.__uploadJob = async function (axiosInst, url, formData, cfg){
+  var res, d;
+  try {
+    var uploadOptions = Object.assign({}, cfg || {});
+    uploadOptions.withCredentials = true;
+    uploadOptions.headers = Object.assign({}, uploadOptions.headers || {});
+    if (window.__serveoneDesktopUploadToken && /^\/api\/upload\/(smro|product-id|item-registration)(\?|$)/.test(url)) {
+      uploadOptions.headers['X-Serveone-Desktop-Upload'] = window.__serveoneDesktopUploadToken;
+    }
+    // Explicit manual-import capability is restricted to these localhost routes.
+    // Do not put a capability on any external URL.
+    var target = new URL(url, location.href);
+    var isImport = target.origin === location.origin && /^\/api\/upload\/(smro|product-id|item-registration|master-pic)$/.test(target.pathname);
+    if (isImport && window.__serveoneDesktopUploadToken) {
+      target.searchParams.set('desktop_ui_ticket', window.__serveoneDesktopUploadToken);
+    }
+    res = await axiosInst.post(isImport ? target.pathname + target.search : url, formData, uploadOptions);
+  } catch (e) {
+    if (window.__jobPill) window.__jobPill(null);
+    throw e;
+  }
+  d = res && res.data;
+  if (!(d && d.job_id && d.queued)) return res;   /* bukan job background */
+  var jobId = d.job_id, missing = 0, st;
+  if (window.__jobPill) window.__jobPill('Importing Excel into local database\u2026');
+  try {
+    for (var i = 0; i < 720; i++){               /* maks ~30 menit */
+      await new Promise(function (r){ setTimeout(r, 2500); });
+      try {
+        var pollUrl = '/api/upload/job-status/' + encodeURIComponent(jobId);
+        if (window.__serveoneDesktopUploadToken) {
+          pollUrl += '?desktop_ui_ticket=' + encodeURIComponent(window.__serveoneDesktopUploadToken);
+        }
+        st = (await axiosInst.get(pollUrl, {withCredentials: true})).data;
+        missing = 0;
+      } catch (e) {
+        missing++;
+        if (missing >= 4){
+          /* worker restart / registry hilang - jangan biarkan user menggantung */
+          var lost = new Error('Cannot verify the upload status. The data may already have been committed.');
+          lost.response = { data: { error: 'Upload status cannot be verified. Check the updated data or server logs before retrying this file to avoid duplicate imports.' } };
+          throw lost;
+        }
+        continue;
+      }
+      if (st && st.status === 'done') return { data: st.result };
+      if (st && st.status === 'error'){
+        var err = new Error('Upload failed');
+        err.response = { data: (st && st.result) || { error: (st && st.error) || 'Upload failed to process' } };
+        throw err;
+      }
+      if (window.__jobPill){
+        window.__jobPill(st && st.status === 'queued'
+          ? 'Waiting for other uploads to finish\u2026'
+          : (st && st.status === 'refreshing'
+              ? 'Refreshing dashboard data\u2026'
+              : 'Importing Excel into local database\u2026'));
+      }
+    }
+    var slow = new Error('Upload is taking too long');
+    slow.response = { data: { error: 'Local import is taking too long. Reload the page to check the result.' } };
+    throw slow;
+  } finally {
+    if (window.__jobPill) window.__jobPill(null);
+  }
+};
+
+/* ── Patch XMLHttpRequest (axios memakai XHR secara default) ── */
+var XO = window.XMLHttpRequest;
+if (XO && XO.prototype){
+  var _open = XO.prototype.open, _send = XO.prototype.send;
+  XO.prototype.open = function(method, url){
+    this._zUrl = url;
+    return _open.apply(this, arguments);
+  };
+  XO.prototype.send = function(){
+    try {
+      var u = String(this._zUrl || '');
+      // React Pending Settlement owns its loading state; background requests and
+      // not page loads; do not cover the screen with a global loading toast.
+      this._zTrackLoad = location.pathname.toLowerCase() !== '/ai_intelligence' && !/^(data:|blob:)/i.test(u) && !/\/api\/(data\/pending-settlement(?:-detail)?|upload\/job-status|access\/activity|desktop\/(?:data-revision|status|logs|sheets\/status))(\/|\?|$)/i.test(u);
+      if (this._zTrackLoad) requestStarted();
+    } catch (e) { this._zTrackLoad = false; }
+    this.addEventListener('loadend', function(){ if (this._zTrackLoad) try { requestFinished(); } catch (e) {} });
+    // Explicit ephemeral desktop session for all SAME-ORIGIN dashboard APIs,
+    // including /api/upload/job-status polling and cache invalidation.
+    // Never attach the token to company SAP/S-MRO or an external URL.
+    try {
+      var localUrl = new URL(this._zUrl || '', location.href);
+      if (localUrl.origin === location.origin && localUrl.pathname.indexOf('/api/') === 0
+          && window.__serveoneDesktopUploadToken) {
+        this.withCredentials = true;
+        this.setRequestHeader('X-Serveone-Desktop-Upload', window.__serveoneDesktopUploadToken);
+      }
+    } catch (_e) {}
+    return _send.apply(this, arguments);
+  };
+}
+
+/* ── Patch fetch (jika suatu saat app memakai fetch adapter) ── */
+if (typeof window.fetch === 'function'){
+  var _fetch = window.fetch;
+  window.fetch = function(input){
+    var trackLoad = false;
+    try {
+      var u = (input && input.url) ? input.url : String(input);
+      trackLoad = location.pathname.toLowerCase() !== '/ai_intelligence' && !/^(data:|blob:)/i.test(u) && !/\/api\/(data\/pending-settlement(?:-detail)?|upload\/job-status|access\/activity|desktop\/(?:data-revision|status|logs|sheets\/status))(\/|\?|$)/i.test(u);
+      if (trackLoad) requestStarted();
+    } catch (e) { trackLoad = false; }
+    var p;
+    try {
+      var args=Array.prototype.slice.call(arguments);
+      var reqUrl=new URL((input && input.url) ? input.url : String(input),location.href);
+      if (reqUrl.origin === location.origin && reqUrl.pathname.indexOf('/api/') === 0
+          && window.__serveoneDesktopUploadToken) {
+        var oldOptions=args[1]||{};
+        var hdr=new Headers(oldOptions.headers || ((input && input.headers) ? input.headers : undefined));
+        hdr.set('X-Serveone-Desktop-Upload',window.__serveoneDesktopUploadToken);
+        args[1]=Object.assign({},oldOptions,{headers:hdr,credentials:'same-origin'});
+      }
+      p=_fetch.apply(this,args);
+    }
+    catch (e) { if (trackLoad) requestFinished(); throw e; }
+    return p.then(
+      function(res){ if (trackLoad) requestFinished(); return res; },
+      function(err){ if (trackLoad) requestFinished(); throw err; }
+    );
+  };
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   V61 UX FIX #2 - Seleksi teks hanya pada SATU KOLOM tabel.
+   Dulu: shift+click / drag di tabel ikut men-select teks kolom sebelah
+   (seperti seleksi tabel MS Word), sehingga copy-paste membawa nilai kolom
+   lain. Sekarang: saat shift+click atau drag vertikal di dalam sebuah kolom,
+   semua kolom lain diberi user-select:none selama proses seleksi berlangsung,
+   sehingga hanya nilai pada kolom yang sama yang ikut terpilih & ter-copy.
+   ════════════════════════════════════════════════════════════════════════ */
+function cellOf(target){
+  var el = target;
+  while (el && el !== document){
+    if (el.tagName === 'TD' || el.tagName === 'TH') return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+function colIndexOf(cell){
+  if (typeof cell.cellIndex === 'number') return cell.cellIndex;
+  var kids = cell.parentElement ? cell.parentElement.children : [];
+  for (var i = 0; i < kids.length; i++) if (kids[i] === cell) return i;
+  return -1;
+}
+function isInteractive(target){
+  var el = target;
+  while (el && el !== document){
+    var tag = (el.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
+        tag === 'BUTTON' || tag === 'A' || el.isContentEditable) return true;
+    el = el.parentElement;
+  }
+  return false;
+}
+function lockColumn(table, idx){
+  var rows = table.rows;
+  for (var r = 0; r < rows.length; r++){
+    var cells = rows[r].cells;
+    for (var c = 0; c < cells.length; c++){
+      var sel = (c === idx) ? '' : 'none';
+      cells[c].style.userSelect = sel;
+      cells[c].style.webkitUserSelect = sel;
+    }
+  }
+}
+function unlockColumn(table){
+  if (!table) return;
+  var tds = table.querySelectorAll('td,th');
+  for (var i = 0; i < tds.length; i++){
+    tds[i].style.userSelect = '';
+    tds[i].style.webkitUserSelect = '';
+  }
+}
+var drag = null;
+document.addEventListener('mousedown', function(e){
+  if (e.button !== 0) return;
+  var cell = cellOf(e.target);
+  if (!cell || isInteractive(e.target)) return;
+  var row = cell.parentElement;
+  var table = row ? (row.closest ? row.closest('table') : null) : null;
+  if (!table) return;
+  var idx = colIndexOf(cell);
+  if (idx < 0) return;
+  drag = { table: table, idx: idx, x: e.clientX, y: e.clientY, locked: false };
+  if (e.shiftKey){
+    /* Shift+click: seleksi langsung dikunci ke kolom ini */
+    drag.locked = true;
+    lockColumn(table, idx);
+  }
+}, true);
+document.addEventListener('mousemove', function(e){
+  if (!drag || drag.locked) return;
+  var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (dx * dx + dy * dy > 36){
+    /* Drag murni vertikal → kunci kolom; dominan horizontal → biarkan
+       perilaku default (seleksi teks dalam satu sel). */
+    if (Math.abs(dy) >= Math.abs(dx)){
+      drag.locked = true;
+      lockColumn(drag.table, drag.idx);
+    } else {
+      drag = null;
+    }
+  }
+}, true);
+function endDrag(){
+  if (drag){
+    if (drag.locked){
+      var t = drag.table;
+      setTimeout(function(){ unlockColumn(t); }, 0);
+    }
+    drag = null;
+  }
+}
+document.addEventListener('mouseup', endDrag, true);
+window.addEventListener('blur', endDrag);
+
+/* V62.5 (antislop R-32): tombol Escape menutup popover/dropdown/panel/modal
+   yang terbuka. Mekanisme: memanfaatkan perilaku close-on-outside-click yang
+   sudah dimiliki semua panel (simulasi mousedown di <body>), plus klik pada
+   overlay modal teratas bila ada. Dilewati saat user sedang mengetik di
+   input/textarea/select agar Escape tidak mengusir panel yang sedang diisi. */
+document.addEventListener('keydown', function(e){
+  if (e.key !== 'Escape' && e.key !== 'Esc') return;
+  var a = document.activeElement;
+  var txt = a && (a.tagName === 'TEXTAREA' || a.isContentEditable ||
+    (a.tagName === 'INPUT' && !/^(checkbox|radio|button|reset|submit)$/.test(a.type || 'text')));
+  if (txt) return;  /* user sedang mengetik: jangan tutup panel */
+  /* 1) modal overlay teratas yang terlihat (backdrop klik-untuk-tutup) */
+  var overlays = document.querySelectorAll('div.fixed.inset-0');
+  var top = null, topZ = -1;
+  for (var i = 0; i < overlays.length; i++){
+    var el = overlays[i];
+    if (!el.offsetParent && getComputedStyle(el).position !== 'fixed') continue;
+    if (el.offsetParent === null && getComputedStyle(el).display === 'none') continue;
+    var z = parseInt(getComputedStyle(el).zIndex, 10);
+    if (isNaN(z)) z = 0;
+    if (z >= topZ){ topZ = z; top = el; }
+  }
+  if (top){ top.click(); return; }
+  /* 2) popover/dropdown/panel: close-on-outside-click via mousedown body */
+  document.body.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+}, false);
+
+/* V62.7: klik link sidebar memindahkan fokus ke konten (link di-blur-kan)
+   agar :focus-within tidak memegang side panel tetap terbuka setelah navigasi.
+   Navigasi keyboard (tab) tetap memunculkan panel seperti sebelumnya. */
+document.addEventListener('click', function(e){
+  var a = e.target && e.target.closest ? e.target.closest('.nav-side a, .nav-side button') : null;
+  if (a) setTimeout(function(){ if (a.blur) a.blur(); }, 0);
+}, true);
+})();
+    </script>
+
+    <script id="z-unified-table-audit">
+(function(){
+'use strict';
+/* V63.27.73: shared table styling, event-driven. Only process new tables;
+   never rescan every table for each unrelated React class change. */
+var scheduled=false, tableQueue=new Set(), themeDirty=true;
+function apply(){
+  scheduled=false;
+  if(!document.body)return;
+  if(themeDirty){
+    themeDirty=false;
+    var dark=!!document.querySelector('.data-table-page-dark, main > div.bg-gray-900');
+    document.body.classList.toggle('z-app-dark',dark);
+  }
+  tableQueue.forEach(function(t){if(t.isConnected)t.classList.add('z-ui-table');});
+  tableQueue.clear();
+}
+function queue(){
+  if(scheduled)return;
+  scheduled=true;
+  (window.requestAnimationFrame||function(fn){setTimeout(fn,0);})(apply);
+}
+function accept(node){
+  if(!node||node.nodeType!==1)return;
+  if(node.matches&&node.matches('table'))tableQueue.add(node);
+  if(node.querySelectorAll)node.querySelectorAll('table:not(.z-ui-table)').forEach(function(t){tableQueue.add(t);});
+}
+function start(){
+  accept(document.body);queue();
+  if(typeof MutationObserver==='undefined')return;
+  new MutationObserver(function(records){
+    var update=false;
+    records.forEach(function(m){
+      if(m.type==='childList'){
+        m.addedNodes.forEach(accept);
+        if(m.addedNodes.length||m.removedNodes.length){themeDirty=true;update=true;}
+      }else if(m.type==='attributes'&&m.target){
+        var target=m.target;
+        if(target===document.body||target.tagName==='MAIN'||target.classList.contains('data-table-page-dark')){
+          themeDirty=true;update=true;
+        }
+      }
+    });
+    if(update||tableQueue.size)queue();
+  }).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});
+else start();
+})();
+    </script>
+    <!-- V63.23: widget "Pending Settlement" kini berada DI DALAM bundle
+     assets/index-C9BxB1mr.js - tidak mungkin terpisah lagi. -->
+  
+<script>
+(function(){
+'use strict';
+/* V63.27.10: Heatmap popup table harmonizer
+   Menyamakan popup Pending Delivery & Pending Settlement:
+   - body popup punya padding sehingga tabel tidak mepet/terpotong
+   - tabel dibungkus frame border rounded
+   - tabel memakai visual system seragam (.z-ui-table) */
+function isHeatmapTitle(t){
+  t = String(t || '').trim();
+  return /^Pending (Settlement|Delivery)\b/i.test(t);
+}
+function textOf(el){ return el ? String(el.textContent || '').trim() : ''; }
+function styleCard(card){
+  if (!card || card.dataset.zHeatmapPopupCard === '1') return;
+  card.dataset.zHeatmapPopupCard = '1';
+  card.classList.add('z-heatmap-popup-card');
+}
+function styleScrollBody(body){
+  if (!body || body.dataset.zHeatmapPopupBody === '1') return;
+  body.dataset.zHeatmapPopupBody = '1';
+  body.classList.add('z-heatmap-popup-body');
+}
+function frameTable(tbl){
+  if (!tbl) return;
+  tbl.classList.add('z-ui-table');
+  var parent = tbl.parentElement;
+  if (!parent) return;
+  if (parent.classList.contains('z-heatmap-popup-frame')) return;
+  var frame = document.createElement('div');
+  frame.className = 'z-heatmap-popup-frame';
+  parent.insertBefore(frame, tbl);
+  frame.appendChild(tbl);
+}
+function harmonizeOne(root){
+  if (!root || root.nodeType !== 1) return;
+  // Settlement manual modal
+  var settlementOverlay = root.id === 'v63ps-modal' ? root : root.querySelector ? root.querySelector('#v63ps-modal') : null;
+  if (settlementOverlay) {
+    var settlementCard = settlementOverlay.querySelector('[role="dialog"]');
+    if (settlementCard) {
+      styleCard(settlementCard);
+      var settlementBody = settlementCard.querySelector('div[style*="overflow:auto"]');
+      if (settlementBody) {
+        styleScrollBody(settlementBody);
+        var tbl = settlementBody.querySelector('table');
+        if (tbl) frameTable(tbl);
+      }
+    }
+  }
+  // Generic React/Tailwind heatmap popup cards for Pending Delivery / Pending Settlement
+  var tables = [];
+  if (root.matches && root.matches('table')) tables.push(root);
+  if (root.querySelectorAll) root.querySelectorAll('table').forEach(function(t){ tables.push(t); });
+  tables.forEach(function(tbl){
+    var card = tbl.closest('div.rounded-2xl, div[role="dialog"], div[class*="rounded"]');
+    if (!card) return;
+    var hasDownload = !!Array.from(card.querySelectorAll('button')).find(function(b){ return /download excel/i.test(textOf(b)); });
+    if (!hasDownload) return;
+    var heading = card.querySelector('h3, h2, [data-popup-title], .font-bold, .text-lg');
+    var title = textOf(heading);
+    if (!isHeatmapTitle(title)) return;
+    styleCard(card);
+    var body = tbl.parentElement;
+    // body = nearest scrollable wrapper inside the card that contains the table
+    var cur = tbl.parentElement;
+    while (cur && cur !== card) {
+      var st = window.getComputedStyle(cur);
+      if (st && /(auto|scroll)/.test((st.overflow || '') + (st.overflowX || '') + (st.overflowY || ''))) { body = cur; break; }
+      cur = cur.parentElement;
+    }
+    if (body && body !== card) styleScrollBody(body);
+    frameTable(tbl);
+  });
+}
+function harmonizeAll(){ harmonizeOne(document.body); }
+var mo = new MutationObserver(function(muts){
+  muts.forEach(function(m){
+    if (m.type === 'childList') {
+      m.addedNodes.forEach(function(n){ harmonizeOne(n); });
+    }
+  });
+});
+if (document.body) {
+  mo.observe(document.body, {childList:true, subtree:true});
+  setTimeout(harmonizeAll, 50);
+  setTimeout(harmonizeAll, 350);
+  setTimeout(harmonizeAll, 1000);
+} else {
+  document.addEventListener('DOMContentLoaded', function(){
+    mo.observe(document.body, {childList:true, subtree:true});
+    harmonizeAll();
+  }, {once:true});
+}
+})();
+</script>
+
+<script id="global-table-range-selection-v632748">
+(function(){
+  "use strict";
+  // V63.27.48: Excel-like range selection + multi-cell clipboard copy for every data table.
+  // Normal click = new anchor/single cell. Ctrl/Cmd/Shift + click = rectangular range from anchor.
+  var anchorCell = null;
+  var anchorTable = null;
+  var selectedCells = [];
+
+  function isInteractiveTarget(target){
+    return !!(target && target.closest && target.closest('button,a,input,select,textarea,[role="button"],[contenteditable="true"]'));
+  }
+
+  function clearSelection(){
+    selectedCells.forEach(function(cell){
+      if (cell && cell.classList) cell.classList.remove('global-cell-selected','global-cell-anchor');
+    });
+    selectedCells = [];
+  }
+
+  function setSelected(cells, anchor){
+    clearSelection();
+    var seen = new Set();
+    cells.forEach(function(cell){
+      if (!cell || seen.has(cell)) return;
+      seen.add(cell);
+      cell.classList.add('global-cell-selected');
+      selectedCells.push(cell);
+    });
+    if (anchor && anchor.classList) anchor.classList.add('global-cell-anchor');
+  }
+
+  function bodyRows(table){
+    // Use rendered rows only; this keeps behavior correct with pagination/virtualized pages.
+    return Array.prototype.filter.call(table.rows || [], function(row){
+      return row && row.parentElement && row.parentElement.tagName !== 'THEAD' && row.parentElement.tagName !== 'TFOOT';
+    });
+  }
+
+  function dataCells(row){
+    return Array.prototype.filter.call(row ? row.cells || [] : [], function(cell){
+      return cell && cell.tagName === 'TD';
+    });
+  }
+
+  function cellPosition(table, cell){
+    var rows = bodyRows(table);
+    for (var r=0; r<rows.length; r++) {
+      var cells = dataCells(rows[r]);
+      for (var c=0; c<cells.length; c++) {
+        if (cells[c] === cell) return {row:r, col:c, rows:rows};
+      }
+    }
+    return null;
+  }
+
+  function rectangularRange(table, fromCell, toCell){
+    var a = cellPosition(table, fromCell);
+    var b = cellPosition(table, toCell);
+    if (!a || !b) return [toCell];
+    var r0=Math.min(a.row,b.row), r1=Math.max(a.row,b.row);
+    var c0=Math.min(a.col,b.col), c1=Math.max(a.col,b.col);
+    var out=[];
+    for (var r=r0; r<=r1; r++) {
+      var cells=dataCells(a.rows[r]);
+      for (var c=c0; c<=c1; c++) {
+        if (cells[c]) out.push(cells[c]);
+      }
+    }
+    return out;
+  }
+
+  document.addEventListener('click', function(ev){
+    if (ev.defaultPrevented || ev.button > 0 || isInteractiveTarget(ev.target)) return;
+    var cell = ev.target && ev.target.closest ? ev.target.closest('td') : null;
+    if (!cell) return;
+    var table = cell.closest('table');
+    if (!table) return;
+
+    var rangeMode = !!(ev.ctrlKey || ev.metaKey || ev.shiftKey);
+    var anchorUsable = anchorCell && anchorTable === table && document.documentElement.contains(anchorCell);
+
+    if (rangeMode && anchorUsable) {
+      setSelected(rectangularRange(table, anchorCell, cell), anchorCell);
+    } else {
+      anchorCell = cell;
+      anchorTable = table;
+      setSelected([cell], cell);
+    }
+  }, true);
+
+  function cellCopyText(cell){
+    if (!cell) return '';
+    var control = cell.querySelector && cell.querySelector('input:not([type="checkbox"]):not([type="radio"]), textarea, select');
+    var value = control ? control.value : (cell.innerText != null ? cell.innerText : cell.textContent || '');
+    return String(value == null ? '' : value)
+      .replace(/\r?\n+/g, ' ')
+      .replace(/\t/g, ' ')
+      .trim();
+  }
+
+  function selectedCellsAsTSV(){
+    if (!selectedCells.length || !anchorTable || !document.documentElement.contains(anchorTable)) return '';
+    var positions = [];
+    selectedCells.forEach(function(cell){
+      var pos = cellPosition(anchorTable, cell);
+      if (pos) positions.push({cell:cell, row:pos.row, col:pos.col});
+    });
+    if (!positions.length) return '';
+    var r0 = Math.min.apply(null, positions.map(function(p){ return p.row; }));
+    var r1 = Math.max.apply(null, positions.map(function(p){ return p.row; }));
+    var c0 = Math.min.apply(null, positions.map(function(p){ return p.col; }));
+    var c1 = Math.max.apply(null, positions.map(function(p){ return p.col; }));
+    var lookup = new Map();
+    positions.forEach(function(p){ lookup.set(p.row + ':' + p.col, p.cell); });
+    var lines = [];
+    for (var r=r0; r<=r1; r++) {
+      var values = [];
+      for (var c=c0; c<=c1; c++) {
+        values.push(cellCopyText(lookup.get(r + ':' + c)));
+      }
+      lines.push(values.join('\t'));
+    }
+    return lines.join('\n');
+  }
+
+  document.addEventListener('copy', function(ev){
+    var active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable)) return;
+    if (!selectedCells.length) return;
+    var text = selectedCellsAsTSV();
+    if (!text) return;
+    if (ev.clipboardData && ev.clipboardData.setData) {
+      ev.preventDefault();
+      ev.clipboardData.setData('text/plain', text);
+    }
+  }, true);
+
+  document.addEventListener('keydown', function(ev){
+    if (ev.key === 'Escape') {
+      clearSelection();
+      anchorCell = null;
+      anchorTable = null;
+    }
+  });
+
+  // Clear stale references after route/page changes without touching React-owned DOM.
+  window.addEventListener('popstate', function(){
+    clearSelection(); anchorCell=null; anchorTable=null;
+  });
+})();
+</script>
+
+  
+
+  
+
+<style id="dedupe-page-title-style-v632769">
+.z-duplicate-page-title{display:none!important}
+</style>
+<script id="dedupe-page-title-v632769">
+(function(){
+'use strict';
+var queued=false,lastPath='';
+function norm(v){return String(v||'').replace(/\s+/g,' ').trim().toLowerCase();}
+function visible(el){
+  if(!el||!document.documentElement.contains(el))return false;
+  var cs=getComputedStyle(el);if(cs.display==='none'||cs.visibility==='hidden'||Number(cs.opacity)===0)return false;
+  var r=el.getBoundingClientRect();return r.width>0&&r.height>0;
+}
+function excluded(el){return !!el.closest('nav,aside,[role="dialog"],[aria-modal="true"],#access-gate,#z-auto-update-popover');}
+function docTop(el){var r=el.getBoundingClientRect();return r.top+(window.scrollY||document.documentElement.scrollTop||0);}
+function fontSize(el){var n=parseFloat(getComputedStyle(el).fontSize||'0');return isFinite(n)?n:0;}
+function candidates(){
+  return Array.prototype.filter.call(document.querySelectorAll('h1,h2,h3,[role="heading"]'),function(el){
+    var t=norm(el.textContent);return t&&t.length<=80&&visible(el)&&!excluded(el);
+  });
+}
+function pickPageTitle(items){
+  if(!items.length)return null;
+  var h1=items.filter(function(el){return el.tagName==='H1';});
+  if(h1.length){h1.sort(function(a,b){return docTop(a)-docTop(b);});return h1[0];}
+  var sorted=items.slice().sort(function(a,b){return docTop(a)-docTop(b);});
+  var firstTop=docTop(sorted[0]);
+  var early=sorted.filter(function(el){return docTop(el)<=firstTop+260;});
+  early.sort(function(a,b){var fs=fontSize(b)-fontSize(a);return fs||docTop(a)-docTop(b);});
+  return early[0]||sorted[0];
+}
+function run(){
+  queued=false;
+  document.querySelectorAll('.z-duplicate-page-title').forEach(function(el){el.classList.remove('z-duplicate-page-title');el.removeAttribute('data-z-page-title-dedup');});
+  var items=candidates(),title=pickPageTitle(items);if(!title)return;
+  var key=norm(title.textContent),top=docTop(title),dups=items.filter(function(el){return el!==title&&norm(el.textContent)===key&&docTop(el)>top+24;});
+  if(!dups.length)return;
+  dups.sort(function(a,b){return docTop(a)-docTop(b);});
+  var dup=dups[0];
+  dup.classList.add('z-duplicate-page-title');dup.setAttribute('data-z-page-title-dedup','1');
+}
+function queue(){if(queued)return;queued=true;(window.requestAnimationFrame||window.setTimeout)(run,0);}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',queue,{once:true});else queue();
+new MutationObserver(function(){queue();}).observe(document.documentElement,{childList:true,subtree:true,characterData:true});
+window.addEventListener('popstate',queue);
+window.addEventListener('hashchange',queue);
+setInterval(function(){var p=location.pathname+location.search;if(p!==lastPath){lastPath=p;queue();}},500);
+setTimeout(queue,250);setTimeout(queue,900);setTimeout(queue,1800);
+})();
+</script>
+
+
+
+
+<script id="vendor-label-v632770">
+(function(){
+'use strict';
+function rename(root){
+  root=root||document.body;if(!root)return;
+  var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);var n;
+  while((n=w.nextNode())){
+    if(String(n.nodeValue||'').trim()==='Vendor_Control') n.nodeValue=n.nodeValue.replace(/Vendor_Control/g,'Vendor');
+  }
+}
+function run(){rename(document.body);}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run,{once:true});else run();
+new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){for(var j=0;j<ms[i].addedNodes.length;j++){var x=ms[i].addedNodes[j];if(x.nodeType===1)rename(x);else if(x.nodeType===3&&String(x.nodeValue||'').trim()==='Vendor_Control')x.nodeValue=x.nodeValue.replace(/Vendor_Control/g,'Vendor');}}}).observe(document.documentElement,{childList:true,subtree:true});
+})();
+</script>
+
+  <script defer src="/desktop/auto_update.js?v=18"></script>
+<script defer src="/desktop/display_controls.js?v=6"></script>
+<script src="/desktop/database_notice.js?v=2" defer></script>
+<script src="/desktop/reports.js?v=8" defer></script>
+<script src="/desktop/ai_intelligence.js?v=5" defer></script>
+</body>
+</html>
