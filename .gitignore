@@ -1,6 +1,6 @@
 .venv/
 build/
-dist/
+dist*/
 .test-tmp/
 __pycache__/
 *.py[cod]
