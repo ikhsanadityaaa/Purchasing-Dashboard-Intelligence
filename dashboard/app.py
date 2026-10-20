@@ -12785,7 +12785,14 @@ def upload_product_id():
         
         existing_pid_map = {}
         if all_pids_in_upload:
-            existing_pid_rows = db.session.query(ProductIDDB).filter(ProductIDDB.product_id.in_(list(all_pids_in_upload))).all()
+            existing_pid_rows = []
+            all_pids_list = list(all_pids_in_upload)
+            for offset in range(0, len(all_pids_list), 32000):
+                existing_pid_rows.extend(
+                    db.session.query(ProductIDDB)
+                    .filter(ProductIDDB.product_id.in_(all_pids_list[offset:offset + 32000]))
+                    .all()
+                )
             existing_pid_map = {p.product_id: p for p in existing_pid_rows}
 
         for upload in uploads:

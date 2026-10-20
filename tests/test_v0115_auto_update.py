@@ -26,6 +26,8 @@ class AutoUpdate0115Tests(unittest.TestCase):
         self.assertNotIn("label.innerHTML=(step==='running'||step==='queued')?'<span class=\"zd-spinner\"", ui)
         self.assertIn("row.classList.add('zd-log-success')",ui)
         self.assertIn("row.classList.add('zd-log-error')",ui)
+        self.assertIn('|Import complete/i.test(text)',ui)
+        self.assertIn('|Import failed/i.test(text)',ui)
         self.assertIn('.zd-log-success{color:#15803d',css)
         self.assertIn('.zd-log-error{color:#b91c1c',css)
 
@@ -36,10 +38,10 @@ class AutoUpdate0115Tests(unittest.TestCase):
             self.assertTrue(runtime.tail_log())
             self.assertEqual({'cleared': True}, runtime.clear_log())
             self.assertEqual([], runtime.tail_log())
-        line = '2026-10-16 08:52:33,351 - INFO - [V29] File Excel stabil'
-        self.assertEqual('Downloading data', DesktopRuntime._progress_text(line))
+        line = '2026-10-16 08:52:33,351 - INFO - [V29] File Excel stabil: ProductID_20261016_085233.xlsx (56252928 bytes)'
+        self.assertEqual('Downloaded ProductID_20261016_085233.xlsx | 53.6 MB', DesktopRuntime._progress_text(line))
         activity = '[2026-10-16T08:52:33] [serp] ' + line
-        self.assertEqual('[08:52:33] [serp] Downloading data\n', DesktopRuntime._activity_text(activity))
+        self.assertEqual('[08:52:33] [serp] Downloaded ProductID_20261016_085233.xlsx | 53.6 MB\n', DesktopRuntime._activity_text(activity))
         detail='ACTIVITY Started | Process: All Product ID | Range: 2026-09-16 to 2026-10-16 | Trigger: Manual | Mode: Headless'
         self.assertEqual(detail[9:],DesktopRuntime._progress_text(detail))
         failed='ACTIVITY Finished | Process: All Product ID | Result: Failed | Error: SAP login timeout'
@@ -54,15 +56,38 @@ class AutoUpdate0115Tests(unittest.TestCase):
             activity = ''.join(runtime.tail_log())
             self.assertNotIn('SAPFileField', activity)
             self.assertIn('Signing in', activity)
-            self.assertIn('Updating local data', activity)
+            self.assertIn('Import failed | HTTP 500', activity)
+
+    def test_activity_log_preserves_range_rows_file_retry_and_real_failure(self):
+        cases = {
+            'Processing date: 2020-01-01 - 2026-10-20': 'Date range: 2020-01-01 to 2026-10-20',
+            'Default range All Product ID: 2020.01.01 s/d 2026.10.20': 'Date range: 2020-01-01 to 2026-10-20',
+            'Hasil search: 55000 rows': 'Found 55,000 rows',
+            'Local Import ke SQLite: ProductID_20261020_082809.xlsx (54934.5 KB, attempt 2/5)': 'Importing ProductID_20261020_082809.xlsx | 53.6 MB | attempt 2/5',
+            'Upload sukses HTTP 200: OK | added=843 updated=325 | 2.6s': 'Import complete | 843 added | 325 updated',
+            'Upload gagal HTTP 500: too many SQL variables (attempt 1/5)': 'Import failed | SQLite parameter limit exceeded | attempt 1/5',
+        }
+        for line, expected in cases.items():
+            self.assertEqual(expected, DesktopRuntime._progress_text(line))
+        with TemporaryDirectory() as folder:
+            runtime = DesktopRuntime(Path(folder), 'test-secret', 12345, ROOT)
+            runtime.log('ERROR Upload gagal HTTP 500: sqlite3.OperationalError: too many SQL variables')
+            offset = 0
+            runtime.log('INFO VPN terhubung')
+            self.assertEqual('SQLite parameter limit exceeded while matching Product IDs', runtime._failure_reason(offset, 1))
+
+    def test_product_id_lookup_is_batched_below_sqlite_parameter_limit(self):
+        backend = (ROOT / 'dashboard/app.py').read_text(encoding='utf-8')
+        self.assertIn('for offset in range(0, len(all_pids_list), 32000):', backend)
+        self.assertIn('all_pids_list[offset:offset + 32000]', backend)
 
     def test_process_card_progress_is_short_english(self):
         cases = {
             'Buka portal ServeOne...': 'Opening browser',
             'Login berhasil': 'Signing in',
             'Membuka SAP GUI...': 'Opening SAP',
-            'Processing date: 2026-10-01 - 2026-10-16': 'Searching data',
-            'Local Import Item Registration': 'Updating local data',
+            'Processing date: 2026-10-01 - 2026-10-16': 'Date range: 2026-10-01 to 2026-10-16',
+            'Local Import Item Registration': 'Importing local data',
         }
         for line, expected in cases.items():
             self.assertEqual(expected, DesktopRuntime._progress_text(line))

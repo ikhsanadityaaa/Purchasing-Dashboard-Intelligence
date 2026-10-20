@@ -290,16 +290,44 @@ class DesktopRuntime:
         text=str(line or '').strip()
         text=re.sub(r'^\[\d{4}-\d\d-\d\dT[^\]]+\]\s*', '', text)
         text=re.sub(r'^\[(?:smro|serp|pur)\]\s*', '', text, flags=re.I)
-        text=re.sub(r'^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:,\d+)?\s*-\s*(?:INFO|WARNING|ERROR|DEBUG)\s*-\s*', '', text, flags=re.I)
+        text=re.sub(r'^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:,\d+)?\s*-\s*(?:INFO|WARNING|PERINGATAN|ERROR|DEBUG)\s*-\s*', '', text, flags=re.I)
         if text.startswith('ACTIVITY '):return text[9:]
         lower=text.lower()
         step=re.match(r'^\[(\d+)/(\d+)\]', text)
+        attempt=re.search(r'attempt\s+(\d+)/(\d+)', text, flags=re.I)
+        filename=re.search(r'([^\\/:*?"<>|\s]+\.xlsx?)', text, flags=re.I)
+        size_bytes=re.search(r'\((\d+)\s+bytes\)', text, flags=re.I)
+        size_kb=re.search(r'\(([\d.]+)\s+KB(?:,|\))', text, flags=re.I)
+        size=''
+        if size_bytes:size=f'{int(size_bytes.group(1)) / 1048576:.1f} MB'
+        elif size_kb:size=f'{float(size_kb.group(1)) / 1024:.1f} MB'
+        date_range=re.search(r'(?:processing date|default range all product id|isi register date):\s*(\d{4}[-/.]\d\d[-/.]\d\d)\s*(?:-|s/d|to)\s*(\d{4}[-/.]\d\d[-/.]\d\d)', text, flags=re.I)
+        row_count=re.search(r'(?:hasil search|result|found)\D*([\d,]+)\s+rows?\b', text, flags=re.I)
+        if date_range:return f'Date range: {date_range.group(1).replace(".", "-").replace("/", "-")} to {date_range.group(2).replace(".", "-").replace("/", "-")}'
+        if re.search(r'upload gagal|import failed', lower):
+            http_status=re.search(r'http\s+(\d{3})', lower)
+            reason='SQLite parameter limit exceeded' if 'too many sql variables' in lower else (f'HTTP {http_status.group(1)}' if http_status else 'See error details')
+            tries=f' | attempt {attempt.group(1)}/{attempt.group(2)}' if attempt else ''
+            return f'Import failed | {reason}{tries}'
+        if re.search(r'upload sukses|local import berhasil|import complete', lower):
+            counts=[]
+            for label in ('added','updated'):
+                match=re.search(rf'\b{label}=([\d,]+)', text, flags=re.I)
+                if match:counts.append(f'{int(match.group(1).replace(",", "")):,} {label}')
+            return 'Import complete' + (f' | {" | ".join(counts)}' if counts else '')
+        if re.search(r'local import|upload dashboard|updating local|importing', lower):
+            details=[filename.group(1) if filename else 'local data']
+            if size:details.append(size)
+            if attempt:details.append(f'attempt {attempt.group(1)}/{attempt.group(2)}')
+            return 'Importing ' + ' | '.join(details)
+        if row_count:return f'Found {int(row_count.group(1).replace(",", "")):,} rows'
+        if filename and re.search(r'file excel stabil|\bfile:', lower):
+            return f'Downloaded {filename.group(1)}' + (f' | {size}' if size else '')
         if 'run all complete with errors' in lower:return 'Completed with errors'
         if 'transient browser blob entries omitted' in lower:return 'Browser noise hidden'
         if re.search(r'\b(stop|stopped|cancel|cancelled|dibatalkan|dihentikan)\b', lower):return 'Stopping'
         if 'vpn' in lower:return 'VPN connected' if re.search(r'(connected|terhubung)', lower) else 'Waiting for VPN'
-        if re.search(r'(retry|mencoba ulang|coba lagi|attempt \d+)', lower):return 'Retrying'
-        if re.search(r'(local import|upload|updating local|importing)', lower):return 'Updating local data'
+        if re.search(r'(retry|mencoba ulang|coba lagi|attempt \d+)', lower):return 'Retrying' + (f' | attempt {attempt.group(1)}/{attempt.group(2)}' if attempt else '')
         if re.search(r'(sqlite|database|saved locally|disimpan lokal|saving)', lower):return 'Saving data'
         if re.search(r'(excel|\.xls\b|\.xlsx\b|download)', lower):return 'Downloading data'
         if re.search(r'(t-?code|transaction|ok-code)', lower):return 'Opening SAP transaction'
@@ -371,8 +399,15 @@ class DesktopRuntime:
                 fragment=stream.read(131072).decode('utf-8',errors='replace')
             lines=[self._clean_log_line(x).strip() for x in fragment.splitlines() if x.strip()]
             lines=[x for x in lines if not ('blob:' in x.lower() or '[browser blob URL]' in x)]
-            candidates=[x for x in lines if re.search(r'(?i)(traceback|exception|error|failed|gagal|denied|timeout|not found|invalid|vpn|required|refused|permission|HTTP [45]\d\d)',x)]
-            detail=(candidates[-1] if candidates else (lines[-1] if lines else '')).strip()
+            def error_score(value):
+                if re.search(r'(?i)(traceback|exception|\bERROR\b|sqlite|too many sql variables)',value):return 3
+                if re.search(r'(?i)(failed|gagal|HTTP [45]\d\d|denied|timeout|not found|invalid|required|refused|permission)',value):return 2
+                if re.search(r'(?i)vpn.*(not connected|disconnected|failed|required)',value):return 1
+                return 0
+            candidates=[(error_score(x),index,x) for index,x in enumerate(lines) if error_score(x)]
+            detail=(max(candidates)[2] if candidates else (lines[-1] if lines else '')).strip()
+            if 'too many sql variables' in detail.lower():
+                detail='SQLite parameter limit exceeded while matching Product IDs'
             return (detail[:240] if detail else f'Worker exited with code {exit_code}; open Activity Log for details')
         except (OSError,UnicodeError):
             return f'Worker exited with code {exit_code}; log unavailable'
