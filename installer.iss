@@ -25,6 +25,13 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=assets\serveone_icon.ico
 CloseApplications=yes
 RestartApplications=no
+UsePreviousAppDir=yes
+
+[InstallDelete]
+; Remove only packaged application payload. User data lives outside {app}.
+Type: files; Name: "{app}\{#MyAppExeName}"
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\support"
 
 [Files]
 Source: "dist\ServeoneDashboard\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -34,8 +41,10 @@ Source: "vendor\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; DestDir: "{app}\s
 [Icons]
 Name: "{autoprograms}\Serveone Dashboard"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\Serveone Dashboard"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userstartup}\Serveone Dashboard"; Filename: "{app}\{#MyAppExeName}"; Tasks: autostart
 [Tasks]
 Name: desktopicon; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"
+Name: autostart; Description: "Start Serveone Dashboard when I sign in"; GroupDescription: "Additional options:"
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Serveone Dashboard"; Flags: nowait postinstall skipifsilent; Check: PrerequisitesOk
 

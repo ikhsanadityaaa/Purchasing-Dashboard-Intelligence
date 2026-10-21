@@ -11,6 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AutoUpdate0115Tests(unittest.TestCase):
+    def test_serp_large_export_waits_ten_minutes_and_reports_progress(self):
+        source=(ROOT/'automation'/'automation_serp.py').read_text('utf8')
+        self.assertIn("SERP_FILE_WAIT_SECONDS', '600'",source)
+        self.assertIn("wait_seconds  = CONFIG['FILE_WAIT_SECONDS']",source)
+        self.assertIn('ACTIVITY Waiting for SAP export file',source)
+        self.assertIn('SAP export status',source)
+
     def test_legacy_xls_reader_is_packaged(self):
         requirements = (ROOT / 'requirements-windows.txt').read_text(encoding='utf-8')
         build = (ROOT / 'build_windows.bat').read_text(encoding='utf-8')

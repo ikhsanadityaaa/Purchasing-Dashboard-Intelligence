@@ -177,6 +177,7 @@ CONFIG = {
     'FILENAME_PREFIX'  : os.getenv('SERP_FILENAME_PREFIX', 'ProductID'),
     'VPN_CHECK_SECONDS': int(os.getenv('SMRO_VPN_CHECK_SECONDS', '60')),
     'RETRY_SECONDS'    : int(os.getenv('SERP_RETRY_SECONDS', '300')),
+    'FILE_WAIT_SECONDS': max(60, int(os.getenv('SERP_FILE_WAIT_SECONDS', '600'))),
     'SHOW_POPUP'       : os.getenv('SMRO_SHOW_POPUP', 'true').lower() in ('1', 'true', 'yes'),
     'KEEP_OPEN_ON_ERR' : os.getenv('KEEP_BROWSER_OPEN_ON_ERROR', 'false').lower() in ('1', 'true', 'yes'),
     'SAP_TCODE'        : 'ZMMR3190',
@@ -3718,7 +3719,8 @@ class SapGuiAutomation:
 
         time.sleep(3)
 
-        # FIX V29: tunggu file Excel target muncul + stabil (maks 60 detik).
+        # Large SAP exports can spend several minutes generating the workbook
+        # after the Generate dialog closes.
         # Klik Generate/Save memicu popup "SAP GUI Security" (Allow/Deny) yang
         # MENAHAN pembuatan file sampai di-dismiss — file baru muncul beberapa
         # detik setelah guard mengklik Allow. Pemeriksaan lama (sekali saja
@@ -3730,7 +3732,9 @@ class SapGuiAutomation:
         target_path   = CONFIG['DOWNLOAD_DIR'] / filename
         # Kalau dialog Save sendiri tidak pernah terdeteksi, tidak ada gunanya
         # menunggu file 60 detik (perilaku lama: langsung gagal cepat).
-        deadline_wait = time.time() + (60 if dialog_found else 0)
+        wait_seconds  = CONFIG['FILE_WAIT_SECONDS'] if dialog_found else 0
+        deadline_wait = time.time() + wait_seconds
+        next_progress = time.time() + 30
         last_size     = -1
         while time.time() < deadline_wait:
             # Popup bisa muncul telat (setelah dialog save ditutup) — terus
@@ -3745,8 +3749,27 @@ class SapGuiAutomation:
                     f"  [V29] File Excel stabil: {filename} ({cur_size} bytes)"
                 )
                 break
+            if time.time() >= next_progress:
+                remaining=max(0, int(deadline_wait-time.time()))
+                logging.info(
+                    f"ACTIVITY Waiting for SAP export file | Remaining: {remaining}s"
+                )
+                next_progress=time.time()+30
             last_size = cur_size
             time.sleep(2)
+
+        if not target_path.exists() or target_path.stat().st_size <= 0:
+            try:
+                sess=self._get_sap_session()
+                status=sess.findById("wnd[0]/sbar")
+                status_text=str(getattr(status,"Text","") or "").strip()
+                status_type=str(getattr(status,"MessageType","") or "").strip()
+                if status_text:
+                    logging.error(
+                        f"  SAP export status [{status_type or 'unknown'}]: {status_text}"
+                    )
+            except Exception:
+                pass
 
         return self._find_downloaded_file(filename)
 

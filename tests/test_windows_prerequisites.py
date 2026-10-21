@@ -91,6 +91,13 @@ class WindowsPrerequisiteTests(unittest.TestCase):
         self.assertIn('Check: PrerequisitesOk', iss)
         self.assertIn('if WebView2Installed() then', iss)
         self.assertNotIn('drive.google.com', iss)
+        self.assertIn('UsePreviousAppDir=yes', iss)
+        self.assertIn('Type: filesandordirs; Name: "{app}\\_internal"', iss)
+        self.assertIn('Name: autostart;', iss)
+        self.assertIn('Name: "{userstartup}\\Serveone Dashboard";', iss)
+        self.assertIn('Tasks: autostart', iss)
+        install_delete=iss.split('[InstallDelete]',1)[1].split('[Files]',1)[0]
+        self.assertNotIn('ServeoneDashboardDesktop', install_delete)
         build = (root/'build_installer_windows.bat').read_text(encoding='utf-8')
         self.assertIn('%LocalAppData%\\Programs\\Inno Setup 6\\ISCC.exe', build)
         self.assertIn('-ExecutionPolicy Bypass', build)
