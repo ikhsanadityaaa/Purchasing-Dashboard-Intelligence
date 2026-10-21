@@ -3198,7 +3198,8 @@ def _fetch_rate_from_api(d, currency='USD'):
         order.remove(_ok); order.insert(0, _ok)
     for i in order:
         try:
-            with urllib.request.build_opener(handlers[i][1]).open(url, timeout=6) as resp:
+            req = urllib.request.Request(url, headers={'User-Agent': 'ServeoneDashboard/1.0'})
+            with urllib.request.build_opener(handlers[i][1]).open(req, timeout=6) as resp:
                 data = _json.loads(resp.read())
             rate = float(data['rate'])
             if rate > 0:
@@ -3288,7 +3289,7 @@ def get_currency_to_idr(currency, d, cache_only=False):
 # Cap on parallel FX API calls per prefetch — prevents hammering the upstream
 # frankfurter API when a large upload introduces many new unique dates.
 _FX_PARALLEL_MAX = 8
-_FX_FETCH_CAP_PER_CALL = 40  # max unique dates to fetch in a single prefetch call
+_FX_FETCH_CAP_PER_CALL = 64  # covers current EUR history in one prefetch
 
 
 def _fetch_rates_parallel(dates_sorted, currency='USD'):
@@ -8301,13 +8302,50 @@ def find_similar_registered_items(item, registered_items=None):
         traceback.print_exc()
         return None
 
+# Update labels are cheap metadata. Read them live even when dashboard aggregates
+# come from SWR cache, so a completed upload is visible immediately.
+def _dashboard_update_timestamps():
+    last_uploads = db.session.query(
+        UploadLog.file_type, func.max(UploadLog.uploaded_at)
+    ).group_by(UploadLog.file_type).all()
+    last_upload_map = {file_type: uploaded_at for file_type, uploaded_at in last_uploads}
+    if not last_upload_map:
+        last_so_row = db.session.query(func.max(SOData.uploaded_at)).scalar()
+        if last_so_row:
+            last_upload_map = {'SO': last_so_row}
+
+    so_table_times = db.session.query(
+        func.max(SOData.uploaded_at), func.max(SOData.updated_at)
+    ).first()
+    item_reg_table_times = db.session.query(
+        func.max(ItemRegistration.uploaded_at), func.max(ItemRegistration.updated_at)
+    ).first()
+    last_upload = max(last_upload_map.values()) if last_upload_map else None
+    last_so_upload = max(
+        filter(None, [last_upload_map.get('SO'), last_upload_map.get('SMRO'), *(so_table_times or ())]),
+        default=None,
+    )
+    last_item_reg_upload = max(
+        filter(None, [last_upload_map.get('ITEM_REG'), last_upload_map.get('ItemRegistration'), *(item_reg_table_times or ())]),
+        default=None,
+    )
+    return {
+        'last_updated': utc_isoformat(last_upload),
+        'last_updated_smro': utc_isoformat(last_so_upload),
+        'last_updated_item_registration': utc_isoformat(last_item_reg_upload),
+    }
+
+
 # BAGIAN 1 SELESAI DI SINI. SILAKAN BALAS "lanjut" UNTUK MENDAPATKAN BAGIAN 2.
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
     try:
         cache_key = runtime_cache_key('dashboard_stats_v2_sql')
         cached = runtime_cache_get_swr(cache_key, request.full_path)
-        if cached is not None: return jsonify(cached)
+        if cached is not None:
+            cached = dict(cached)
+            cached.update(_dashboard_update_timestamps())
+            return jsonify(cached)
         date_year, date_from, date_to = parse_so_date_args()
         clients = selected_clients()
         pics = selected_pics()
@@ -8421,31 +8459,7 @@ def get_dashboard_stats():
             label = canonical_pending_pic(p, '')
             if label and label not in seen_pics: seen_pics.add(label); pic_options.append(label)
         
-        last_uploads = db.session.query(UploadLog.file_type, func.max(UploadLog.uploaded_at)).group_by(UploadLog.file_type).all()
-        last_upload_map = {ft: dt for ft, dt in last_uploads}
-        # V63.11: DB hasil recovery bisa kehilangan isi upload_log → label
-        # "Updates" kanan-atas kosong/salah. Fallback: max(uploaded_at) so_data.
-        if not last_upload_map:
-            try:
-                _fb_so6311 = db.session.query(func.max(SOData.uploaded_at)).scalar()
-                if _fb_so6311: last_upload_map = {'SO': _fb_so6311}
-            except Exception:
-                pass
-        last_upload = max(last_upload_map.values()) if last_upload_map else None
-        so_table_times = db.session.query(
-            func.max(SOData.uploaded_at), func.max(SOData.updated_at)
-        ).first()
-        item_reg_table_times = db.session.query(
-            func.max(ItemRegistration.uploaded_at), func.max(ItemRegistration.updated_at)
-        ).first()
-        last_so_upload = max(
-            filter(None, [last_upload_map.get('SO'), last_upload_map.get('SMRO'), *(so_table_times or ())]),
-            default=None,
-        )
-        last_item_reg_upload = max(
-            filter(None, [last_upload_map.get('ITEM_REG'), last_upload_map.get('ItemRegistration'), *(item_reg_table_times or ())]),
-            default=None,
-        )
+        update_timestamps = _dashboard_update_timestamps()
         last_po_upload = None
         rfq_fetched_at = RFQ_CACHE.get('fetched_at')
         
@@ -8495,8 +8509,8 @@ def get_dashboard_stats():
             'top_vendors': top_vendors, 'top_op_units': top_op_units, 'so_status': so_status, 'so_status_monthly': so_status_monthly,
             'status_months': status_months, 'item_registration_proc_status': item_registration_proc_status, 'item_registration_clients': item_registration_clients,
             'item_registration_pics': item_registration_pics,
-            'filters': {'clients': client_options, 'pics': pic_options}, 'last_updated': utc_isoformat(last_upload), 'last_updated_po': utc_isoformat(last_po_upload),
-            'last_updated_smro': utc_isoformat(last_so_upload), 'last_updated_item_registration': utc_isoformat(last_item_reg_upload), 'last_updated_rfq': utc_isoformat(rfq_fetched_at),
+            'filters': {'clients': client_options, 'pics': pic_options}, **update_timestamps, 'last_updated_po': utc_isoformat(last_po_upload),
+            'last_updated_rfq': utc_isoformat(rfq_fetched_at),
             'so_covered_months': so_covered_months, 'so_updated_months_today': so_updated_months_today, 'so_updated_months_today_date': wib_today.isoformat(),
             'po_date_range': {'min': None, 'max': None},
             'so_date_range': {'min': so_date_range[0].isoformat() if so_date_range and so_date_range[0] else None, 'max': so_date_range[1].isoformat() if so_date_range and so_date_range[1] else None},
@@ -10876,6 +10890,38 @@ SETTLEMENT_SORTS = {
     'delivery_complete_date_desc': ('delivery_complete_date', True),
 }
 
+def _settlement_check_is_pending(s, field):
+    """Apply settlement business rules shared by KPI cards and drill-downs."""
+    if clean(getattr(s, 'exception_process', '')):
+        return False
+    delivery_completed = (clean(getattr(s, 'so_status', '')) or '').upper() == 'DELIVERY COMPLETED'
+    purchasing_price = clean(getattr(s, 'purchasing_price', None))
+    price_zero_or_empty = purchasing_price is None
+    if not price_zero_or_empty:
+        try:
+            price_zero_or_empty = float(purchasing_price) == 0
+        except (TypeError, ValueError):
+            price_zero_or_empty = False
+    if price_zero_or_empty and delivery_completed:
+        return False
+    currency = (clean(getattr(s, 'purchasing_currency', '')) or '').upper()
+    if currency not in ('', 'IDR'):
+        return not delivery_completed
+    return clean(getattr(s, field, '')) not in SETTLEMENT_COMPLETE_PHRASES
+
+def _settlement_check_pending_sql(field):
+    exception_empty = func.trim(func.coalesce(SOData.exception_process, '')) == ''
+    currency = func.upper(func.trim(func.coalesce(SOData.purchasing_currency, '')))
+    delivery_completed = func.upper(func.trim(func.coalesce(SOData.so_status, ''))) == 'DELIVERY COMPLETED'
+    return db.and_(
+        exception_empty,
+        db.or_(func.coalesce(SOData.purchasing_price, 0) != 0, ~delivery_completed),
+        db.or_(
+            db.and_(currency.notin_(('', 'IDR')), ~delivery_completed),
+            db.and_(currency.in_(('', 'IDR')), _sett_pend_sql(field)),
+        ),
+    )
+
 def _settlement_filter_rows(rows, view='all', kpi_filter='', terms=None,
                             op_units=None, vendors=None, dc_months=None, exclude=None,
                             trade_type='', aging=None):
@@ -10884,11 +10930,14 @@ def _settlement_filter_rows(rows, view='all', kpi_filter='', terms=None,
     (dipakai untuk menghitung opsi dropdown agar tidak collapse — pola V61.6)."""
     out = rows
     if view == 'pending':
-        out = [s for s in out if clean(s.settlement_status) not in SETTLEMENT_COMPLETE_PHRASES]
+        out = [s for s in out if (
+            _settlement_check_is_pending(s, 'purchasing_settlement_check') or
+            _settlement_check_is_pending(s, 'sales_settlement_status')
+        )]
     if kpi_filter == 'purchase':
-        out = [s for s in out if clean(s.purchasing_settlement_check) not in SETTLEMENT_COMPLETE_PHRASES]
+        out = [s for s in out if _settlement_check_is_pending(s, 'purchasing_settlement_check')]
     elif kpi_filter == 'sales':
-        out = [s for s in out if clean(s.sales_settlement_status) not in SETTLEMENT_COMPLETE_PHRASES]
+        out = [s for s in out if _settlement_check_is_pending(s, 'sales_settlement_status')]
     # V62.6: trade type (Import = purchasing currency non-IDR, Local = IDR;
     # empty purchasing_currency dianggap IDR, konvensi sama dengan app).
     if trade_type == 'import':
@@ -10921,7 +10970,8 @@ def _settlement_filter_rows(rows, view='all', kpi_filter='', terms=None,
         if _aging_wanted:
             def _aging_ok(s):
                 if not s.delivery_complete_date: return False
-                if clean(s.settlement_status) in SETTLEMENT_COMPLETE_PHRASES: return False
+                if not (_settlement_check_is_pending(s, 'purchasing_settlement_check') or
+                        _settlement_check_is_pending(s, 'sales_settlement_status')): return False
                 return get_aging_label(days_since(s.delivery_complete_date)) in _aging_wanted
             out = [s for s in out if _aging_ok(s)]
     return out
@@ -10942,17 +10992,15 @@ def _settlement_kpis(rows):
     total_count = len(rows)
     total_purchase = sum(purchase_amount_idr_for_margin(s) for s in rows)
     total_sales = sum(float(s.sales_amount or 0) for s in rows)
-    purch_not = [s for s in rows if clean(s.purchasing_settlement_check) not in SETTLEMENT_COMPLETE_PHRASES]
-    sales_not = [s for s in rows if clean(s.sales_settlement_status) not in SETTLEMENT_COMPLETE_PHRASES]
+    purch_not = [s for s in rows if _settlement_check_is_pending(s, 'purchasing_settlement_check')]
+    sales_not = [s for s in rows if _settlement_check_is_pending(s, 'sales_settlement_status')]
     # V62.1: PO dihitung dari purchasing settlement (nomor PO unik),
     # SO dihitung dari sales settlement (nomor SO unik).
     all_pos = {clean(s.matched_po_number) for s in rows if clean(s.matched_po_number)}
     pos_not = {clean(s.matched_po_number) for s in purch_not if clean(s.matched_po_number)}
     all_sos = {clean(s.so_number) for s in rows if clean(s.so_number)}
     sos_not = {clean(s.so_number) for s in sales_not if clean(s.so_number)}
-    # V63.5: KPI Settled PO — PO unik yang sudah Settlement Completed
-    _settled_rows = [s for s in rows if clean(s.settlement_status) in SETTLEMENT_COMPLETE_PHRASES]
-    settled_pos = {clean(s.matched_po_number) for s in _settled_rows if clean(s.matched_po_number)}
+    settled_pos = all_pos - pos_not
     return {
         'total_count': total_count,
         'total_po_count': len(all_pos),
@@ -11060,11 +11108,14 @@ def _settlement_sql_filters(q, view='all', kpi_filter='', terms=None,
     sama: checklist view, KPI-click, search multi-kolom, dropdown Op Unit/
     Vendor/bulan Delivery Complete, Aging, dan trade type."""
     if view == 'pending':
-        q = q.filter(_sett_pend_sql(SOData.settlement_status))
+        q = q.filter(db.or_(
+            _settlement_check_pending_sql(SOData.purchasing_settlement_check),
+            _settlement_check_pending_sql(SOData.sales_settlement_status),
+        ))
     if kpi_filter == 'purchase':
-        q = q.filter(_sett_pend_sql(SOData.purchasing_settlement_check))
+        q = q.filter(_settlement_check_pending_sql(SOData.purchasing_settlement_check))
     elif kpi_filter == 'sales':
-        q = q.filter(_sett_pend_sql(SOData.sales_settlement_status))
+        q = q.filter(_settlement_check_pending_sql(SOData.sales_settlement_status))
     if trade_type == 'import':
         q = q.filter(func.upper(func.trim(func.coalesce(SOData.purchasing_currency, ''))).notin_(('', 'IDR')))
     elif trade_type == 'local':
@@ -11099,7 +11150,10 @@ def _settlement_sql_filters(q, view='all', kpi_filter='', terms=None,
             q = q.filter(db.text('1 = 0'))
         else:
             q = q.filter(SOData.delivery_complete_date.isnot(None),
-                         _sett_pend_sql(SOData.settlement_status),
+                         db.or_(
+                             _settlement_check_pending_sql(SOData.purchasing_settlement_check),
+                             _settlement_check_pending_sql(SOData.sales_settlement_status),
+                         ),
                          _cond)
     return q
 
@@ -11119,7 +11173,7 @@ def _settlement_order_sql(sort_key):
 @app.route('/api/settlement/data', methods=['GET'])
 def get_settlement_data():
     try:
-        cache_key = runtime_cache_key('settlement_data')
+        cache_key = runtime_cache_key('settlement_data_v4')
         cached = runtime_cache_get_swr(cache_key, request.full_path)
         if cached is not None: return jsonify(cached)
         page = max(1, int(request.args.get('page', 1)))

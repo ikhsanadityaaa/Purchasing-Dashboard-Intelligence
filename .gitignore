@@ -1,6 +1,7 @@
 .venv/
 build/
 dist*/
+installer_output/
 .test-tmp/
 __pycache__/
 *.py[cod]
@@ -15,6 +16,7 @@ automation/failed_uploads_*/
 *.sqlite
 *.sqlite3
 *.log
+vendor/MicrosoftEdgeWebView2RuntimeInstallerX64.exe
 
 # Local credentials and machine-specific configuration.
 .env

@@ -53,7 +53,7 @@ class ReactSettlementTests(unittest.TestCase):
         style = CSS.read_text('utf-8')
         index = INDEX.read_text('utf-8')
         self.assertIn('/desktop/pending_settlement_react.css?v=14', index)
-        self.assertIn('/assets/index-C9BxB1mr.js?v=desktop-24', index)
+        self.assertIn('/assets/index-C9BxB1mr.js?v=desktop-28', index)
         for cls in ('.ps-react-dark', '.ps-react-table-scroll', '.ps-react-sticky-left',
                     '.ps-react-modal', '.ps-react-kpis', '.ps-react-skeleton-line',
                     '.ps-react-grand-row'):

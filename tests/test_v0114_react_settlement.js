@@ -54,7 +54,7 @@ const find=(tree,type,cls)=>walk(tree,n=>n.type===type&&(!cls||String(n.props.cl
   assert(bundle.includes('(0,$.jsx)(PSReactSummarySection,{url:Za(`/api/data/pending-settlement`),detailUrl:Za(`/api/data/pending-settlement-detail`),onPending:ko,darkMode:n})'));
   assert.equal((bundle.match(/\(0,\$\.jsx\)\(PSReactSummarySection/g)||[]).length,1);
   assert(html.includes('/desktop/pending_settlement_react.css?v=14'));
-  assert(html.includes('desktop-15'));
+  assert(html.includes('desktop-28'));
   assert(!text.includes('MutationObserver'));
   assert(!text.includes('insertBefore(section'));
 
