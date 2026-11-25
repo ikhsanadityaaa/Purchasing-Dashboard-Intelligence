@@ -1676,7 +1676,8 @@ def upload_to_dashboard(file_path: Path, max_retries: int = None) -> bool:
                     timeout=CONFIG.get("UPLOAD_HTTP_TIMEOUT_S", 600),
                 )
             elapsed = time.time() - t0
-            if 200 <= resp.status_code < 300:
+            from lifecycle import import_committed
+            if import_committed(resp):
                 logging.info(f"  Upload berhasil HTTP {resp.status_code} ({elapsed:.1f}s)")
                 return True
             # 5xx retryable
@@ -1771,34 +1772,34 @@ def save_local_copy(file_path: Path, local_dir: str) -> bool:
         logging.error(f"  Simpan lokal gagal: {e}")
         return False
 
-def _wait_vpn_reconnect_pur(interval: int = 30, max_wait: float = None) -> bool:
-    """Tunggu sampai VPN tersambung kembali, cek tiap interval detik.
+def _wait_vpn_reconnect_pur(interval: int = 15, max_wait: float = None) -> bool:
+    """Tunggu sampai VPN tersambung (cek tiap interval detik).
 
-    FIX V23: sebelumnya loop INFINITE — VPN yang tidak pernah kembali
-    membuat worker PUR menggantung selamanya (log tetap bertambah tiap
-    30s sehingga watchdog GUI tidak menyadarinya) dan Run All sequential
-    MACET di step PUR sampai hard timeout 1 jam. Sekarang dibatasi
-    max_wait (default env PUR_INFO_REG_VPN_MAX_WAIT_SECONDS, 900s /
-    15 menit): return True kalau VPN kembali, False kalau menyerah."""
+    Default max_wait = 0 (tunggu sampai VPN terhubung atau user klik Stop All).
+    Bisa dibatasi lewat env PUR_INFO_REG_VPN_MAX_WAIT_SECONDS (>0) jika diperlukan."""
     if max_wait is None:
         try:
-            max_wait = float(os.getenv('PUR_INFO_REG_VPN_MAX_WAIT_SECONDS', '900'))
+            max_wait = float(os.getenv('PUR_INFO_REG_VPN_MAX_WAIT_SECONDS', '0'))
         except Exception:
-            max_wait = 900.0
-    logging.info(f"  Menunggu VPN tersambung kembali (cek tiap {interval}s, maks {int(max_wait)}s)...")
-    deadline = time.time() + max_wait
+            max_wait = 0.0
+    logging.info("ACTIVITY Waiting for VPN")
+    logging.info(f"  Menunggu VPN terhubung... (cek tiap {interval}s)")
+    deadline = (time.time() + max_wait) if max_wait and max_wait > 0 else None
+    last_log = time.time()
     while True:
         time.sleep(interval)
-        if smro.check_vpn_connection():
-            logging.info("  VPN terhubung kembali.")
+        if smro.check_vpn_connection(quiet=True):
+            logging.info("  VPN terhubung — melanjutkan proses.")
             return True
-        if time.time() >= deadline:
+        if deadline is not None and time.time() >= deadline:
             logging.error(
                 f"  VPN BELUM kembali setelah {int(max_wait)}s. Berhenti menunggu — "
                 f"batch ini dilewati supaya proses berikutnya tetap jalan."
             )
             return False
-        logging.info(f"  Masih menunggu VPN... (cek lagi dalam {interval}s)")
+        if time.time() - last_log >= 60:
+            logging.info(f"  Masih menunggu VPN... (cek lagi dalam {interval}s)")
+            last_log = time.time()
 
 
 def _reopen_browser_pur() -> object:
@@ -1845,8 +1846,7 @@ def _sweep_orphan_downloads(download_dir: Path, run_start_names: set) -> int:
             try:
                 if not p.is_file() or p.name in run_start_names:
                     continue
-                if p.suffix.lower() not in {".xlsx", ".xls", ".csv",
-                                            ".crdownload", ".tmp", ".part"}:
+                if p.suffix.lower() not in {".crdownload", ".tmp", ".part"}:
                     continue
                 p.unlink()
                 removed += 1
@@ -1977,7 +1977,8 @@ def process_ranges(driver) -> bool:
             else:
                 logging.info("  Upload dashboard dilewati sesuai setting")
             try:
-                target_path.unlink()
+                if CONFIG["UPDATE_DASHBOARD"] and ok:
+                    target_path.unlink()
                 logging.info(f"  File kerja dihapus: {target_path.name}")
             except Exception as e:
                 logging.warning(f"  Gagal hapus file kerja {target_path.name}: {e}")
@@ -2066,11 +2067,12 @@ def run_automation() -> bool:
     driver = None
     success = False
     try:
-        if not smro.check_vpn_connection():
-            msg = "VPN tidak terhubung!\n\nSilakan connect ke AxGate VPN terlebih dahulu."
-            logging.error(msg)
-            smro.show_popup("VPN Required", msg, success=False)
-            return False
+        if not smro.check_vpn_connection(quiet=True):
+            if not _wait_vpn_reconnect_pur(interval=15):
+                msg = "VPN tidak terhubung!\n\nSilakan connect ke AxGate VPN terlebih dahulu."
+                logging.error(msg)
+                smro.show_popup("VPN Required", msg, success=False)
+                return False
 
         logging.info("\n[Setup] Membuka browser...")
         driver = smro.setup_driver(download_dir=DOWNLOAD_DIR)

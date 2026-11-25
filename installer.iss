@@ -1,8 +1,8 @@
-; Offline-first prerequisites for Serveone Dashboard Desktop V1.0.0
+﻿; Offline-first prerequisites for Serveone Dashboard Desktop V1.0.0
 ; Build: build_windows.bat (includes signed WebView2 Evergreen Standalone x64).
 ; The WebView2 runtime is sourced from Microsoft at BUILD time only.
 #define MyAppName "Serveone Dashboard"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppExeName "ServeoneDashboard.exe"
 #ifnexist "vendor\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
   #error "Missing OFFLINE WebView2 Runtime. Run build_installer_windows.bat."
@@ -11,10 +11,10 @@
 AppId={{8B32921A-332D-475D-96E8-8EEC7CF47021}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-DefaultDirName={localappdata}\Programs\Serveone Dashboard
+DefaultDirName=D:\ServeoneDashboard\app
 DefaultGroupName={#MyAppName}
 OutputDir=installer_output
-OutputBaseFilename=ServeoneDashboard-Setup-V1.0.0
+OutputBaseFilename=ServeoneDashboard-Setup-V1.0.1
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -25,11 +25,12 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=assets\serveone_icon.ico
 CloseApplications=yes
 RestartApplications=no
-UsePreviousAppDir=yes
+UsePreviousAppDir=no
 
 [InstallDelete]
 ; Remove only packaged application payload. User data lives outside {app}.
 Type: files; Name: "{app}\{#MyAppExeName}"
+Type: files; Name: "{app}\chromedriver.exe"
 Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\support"
 
@@ -80,6 +81,17 @@ end;
 
 function InitializeSetup(): Boolean;
 begin
+  Result := False;
+  if not DirExists('D:\') then
+  begin
+    MsgBox('Drive D is required for Serveone application data. Setup will not store the database on C.', mbError, MB_OK);
+    Exit;
+  end;
+  if not ForceDirectories('D:\ServeoneDashboard\data') then
+  begin
+    MsgBox('Cannot create D:\ServeoneDashboard\data. Grant your Windows account write access and retry.', mbError, MB_OK);
+    Exit;
+  end;
   Result := True;
   WebView2InstallationFailed := False;
   if not WebView2Installed() then

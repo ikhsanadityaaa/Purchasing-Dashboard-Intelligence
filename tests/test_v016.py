@@ -64,16 +64,19 @@ class RunAllTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
             with patch('desktop_runtime.CredentialStore') as credential, \
-                 patch('desktop_runtime.subprocess.Popen',return_value=Worker(0,delay=.3)):
+                 patch('desktop_runtime.subprocess.Popen',side_effect=lambda *args,**kwargs: Worker(0,delay=.05)):
                 credential.return_value.load.return_value=('fake','fake')
                 runtime=DesktopRuntime(root,'dummy',5011,root)
                 runtime.store.save(True,[])
                 runtime.launch('all')
+                payload=runtime.launch('smro')
+                self.assertEqual(payload['process_statuses']['smro'], 'queued')
                 with self.assertRaisesRegex(RuntimeError,'still running'):
-                    runtime.launch('smro')
-                for _ in range(200):
-                    if not runtime.status_payload()['batch_active']:break
+                    runtime.launch('smro', wait_if_busy=False)
+                for _ in range(300):
+                    if not runtime.status_payload()['running']:break
                     time.sleep(.01)
+                self.assertEqual(runtime.status_payload()['process_statuses']['smro'], 'completed')
     def test_client_ui_process_badges(self):
         src=(Path(__file__).resolve().parents[1]/'dashboard/static/desktop/auto_update.js').read_text('utf8')
         for text in ('zd-process-success','zd-process-failed','zd-process-waiting','zd-spinner','state.process_statuses','process_ranges:process===\'all\'?edited:undefined'):

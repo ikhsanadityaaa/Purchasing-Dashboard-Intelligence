@@ -43,6 +43,24 @@ SERP_MAX_FAILED_AGE_DAYS = int(os.getenv('SERP_MAX_FAILED_AGE_DAYS', '7'))
 
 import os
 import sys
+
+try:
+    import ssl
+    _orig_ssl_context_new = ssl.SSLContext.__new__
+    def _safe_ssl_context_new(cls, *args, **kwargs):
+        try:
+            return _orig_ssl_context_new(cls, *args, **kwargs)
+        except FileNotFoundError:
+            protocol = kwargs.get('protocol')
+            if not protocol and args:
+                protocol = args[0]
+            if protocol is None:
+                protocol = ssl.PROTOCOL_TLS
+            return ssl._SSLContext.__new__(cls, protocol)
+    ssl.SSLContext.__new__ = _safe_ssl_context_new
+except Exception:
+    pass
+
 import time
 
 # FIX V11: path resolution saat frozen (.exe)
@@ -254,16 +272,18 @@ def save_debug_screenshot(label: str, driver=None):
 
 # ── VPN ───────────────────────────────────────────────────────────────────────
 
-def check_vpn_connection() -> bool:
+def check_vpn_connection(quiet: bool = False) -> bool:
     try:
         r = requests.get(CONFIG['LOGIN_START_URL'], timeout=10, allow_redirects=True)
         if r.status_code == 200:
             logging.info("VPN terhubung")
             return True
-        logging.warning(f"VPN HTTP {r.status_code}")
+        if not quiet:
+            logging.warning(f"VPN HTTP {r.status_code}")
         return False
     except requests.exceptions.RequestException as e:
-        logging.error(f"VPN tidak terhubung: {e}")
+        if not quiet:
+            logging.warning(f"VPN belum terhubung: {e}")
         return False
 
 
@@ -275,21 +295,72 @@ _SERP_PRESERVE_SAP_PIDS = set()
 
 def _process_pids_containing(name_part: str) -> set:
     found = set()
+    sap_targets = {'saplogon.exe', 'sapgui.exe', 'saplgpad.exe', 'sapmsas.exe', 'sapshcut.exe'}
     for proc in psutil.process_iter(['name', 'pid']):
         try:
-            if name_part in (proc.info['name'] or '').lower():
+            name = (proc.info['name'] or '').lower()
+            if name_part == 'sap':
+                if name in sap_targets:
+                    found.add(proc.info['pid'])
+            elif name_part in name:
                 found.add(proc.info['pid'])
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return found
 
 
+def _sanitize_excel_com_registration():
+    """Pastikan HKCU tidak membajak CLSID Excel.Application ke WPS Office."""
+    try:
+        import winreg
+        hkcu = winreg.HKEY_CURRENT_USER
+        wps_keys = [
+            r'Software\Classes\Excel.Application',
+            r'Software\Classes\Excel.Application.12',
+            r'Software\Classes\Excel.Sheet',
+            r'Software\Classes\Excel.Sheet.12',
+            r'Software\Classes\CLSID\{00024500-0000-0000-C000-000000000046}',
+            r'Software\Classes\CLSID\{00020812-0000-0000-C000-000000000046}',
+            r'Software\Classes\CLSID\{00020820-0000-0000-C000-000000000046}',
+            r'Software\Classes\CLSID\{00020821-0000-0000-C000-000000000046}',
+            r'Software\Classes\CLSID\{00020830-0000-0000-C000-000000000046}',
+            r'Software\Classes\CLSID\{00020832-0000-0000-C000-000000000046}',
+        ]
+        def _delete_key_recursive(key, sub):
+            try:
+                k = winreg.OpenKey(key, sub, 0, winreg.KEY_ALL_ACCESS)
+            except OSError:
+                return
+            while True:
+                try:
+                    s = winreg.EnumKey(k, 0)
+                    _delete_key_recursive(k, s)
+                except OSError:
+                    break
+            winreg.CloseKey(k)
+            try:
+                winreg.DeleteKey(key, sub)
+            except OSError:
+                pass
+
+        for pk in wps_keys:
+            try:
+                winreg.CloseKey(winreg.OpenKey(hkcu, pk))
+                _delete_key_recursive(hkcu, pk)
+            except OSError:
+                pass
+    except Exception as e:
+        logging.debug(f"Sanitize Excel COM failed: {e}")
+
+
 def force_close_all_excel():
     """Tutup Excel yang muncul selama run; pertahankan Excel milik user."""
+    _sanitize_excel_com_registration()
     closed = 0
-    for proc in psutil.process_iter(['name', 'pid']):
+    for proc in psutil.process_iter(['name', 'pid', 'cmdline']):
         try:
-            if 'excel' in (proc.info['name'] or '').lower():
+            name = (proc.info['name'] or '').lower()
+            if 'excel' in name:
                 if proc.info['pid'] in _SERP_PRESERVE_EXCEL_PIDS:
                     continue
                 logging.info(f"  Menutup Excel PID {proc.info['pid']}...")
@@ -299,10 +370,15 @@ def force_close_all_excel():
                 except psutil.TimeoutExpired:
                     proc.kill()
                 closed += 1
+            elif 'et.exe' in name or 'wps.exe' in name:
+                cmdline = ' '.join(proc.info.get('cmdline') or []).lower()
+                if '/automation' in cmdline or '-embedding' in cmdline:
+                    proc.terminate()
+                    closed += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     if closed:
-        logging.info(f"  {closed} Excel ditutup.")
+        logging.info(f"  {closed} Excel/Office automation ditutup.")
         time.sleep(2)
     else:
         logging.info("  Tidak ada Excel yang terbuka.")
@@ -372,10 +448,7 @@ def _serp_is_driver_alive(driver) -> bool:
 
 
 def _serp_safe_driver_quit(driver, tag: str = ""):
-    """Quit driver tanpa spam urllib3 + pastikan proses tree benar-benar mati.
-    FIX V16.2: quit() pada chromedriver mati memicu urllib3.Retry 3x; wrapper
-    ini pre-check process state, dan force-kill by PID + by profile supaya
-    chrome.exe orphan tidak menumpuk."""
+    """Quit driver tanpa spam urllib3 + pastikan proses tree benar-benar mati dan profile dibersihkan."""
     if driver is None:
         return
     try:
@@ -390,6 +463,12 @@ def _serp_safe_driver_quit(driver, tag: str = ""):
             _serp_force_kill_driver_tree(driver, tag=tag)
     except Exception:
         _serp_force_kill_driver_tree(driver, tag=tag)
+    finally:
+        try:
+            from lifecycle import cleanup_profile
+            cleanup_profile(driver, '_serp_profile_dir')
+        except Exception:
+            pass
 
 
 def _serp_force_kill_driver_tree(driver, tag: str = ""):
@@ -742,6 +821,8 @@ def setup_driver():
         # FIX V13: anti-crash flags untuk parallel / sequential start.
         opts.add_argument('--no-first-run')
         opts.add_argument('--no-default-browser-check')
+        opts.add_argument('--disable-search-engine-choice-screen')
+        opts.add_argument('--hide-crash-restore-bubble')
         opts.add_argument('--disable-extensions')
         opts.add_argument('--disable-plugins')
         opts.add_argument('--disable-default-apps')
@@ -751,6 +832,8 @@ def setup_driver():
         opts.add_argument('--disable-backgrounding-occluded-windows')
         opts.add_argument('--disable-renderer-backgrounding')
         opts.add_argument('--disable-ipc-flood-protection')
+        opts.add_argument('--disable-features=HttpsUpgrades,HttpsFirstBalancedMode,HttpsFirstModeV2,PushMessaging,NotificationTriggers,InsecureDownloadWarnings,TranslateUI,ChromeWhatsNewUI,OptimizationGuideModelDownloading,OptimizationHintsFetching,OptimizationTargetPrediction')
+        opts.add_argument('--disable-component-update')
         # FIX V13: user-data-dir unik per call + port 0 (auto-pick). Tanpa
         # ini, Chrome start pakai user-data-dir default yang sama dengan
         # instance lain -> saling rebut SingletonLock -> crash.
@@ -779,9 +862,12 @@ def setup_driver():
         # Izinkan mixed-content download (file .sap dari HTTP saat portal HTTPS)
         # Ini yang menyebabkan popup "Insecure download blocked" di Chrome
         opts.add_argument('--allow-running-insecure-content')
+        opts.add_argument('--ignore-certificate-errors')
+        opts.add_argument('--ignore-ssl-errors=yes')
         opts.add_argument(
             '--unsafely-treat-insecure-origin-as-secure='
-            'http://svoerpsso.serveoneep.co.kr:52100'
+            'http://sportal.serveone.id,http://sso.serveone.co.kr:6061,'
+            'http://svobpp.serveone.co.kr,http://svoerpsso.serveoneep.co.kr:52100'
         )
 
         # FIX V24: rantai fallback chromedriver berlapis — menutup error
@@ -791,6 +877,8 @@ def setup_driver():
         # diblokir SSL proxy kantor). Urutan: chromedriver lokal -> cache
         # process -> Selenium Manager -> WDM normal -> WDM SSL-off.
         driver = _serp_create_chrome_with_fallback(opts)
+        from lifecycle import install_portal_navigation
+        install_portal_navigation(driver)
         # FIX V16.2: stash profile_dir + catat PID live supaya quit/cleanup
         # bisa targeted (by PID / by profile), bukan massal.
         try:
@@ -1522,9 +1610,9 @@ def open_sap_file(sap_file: Path) -> bool:
         # FIX V30: no-op refresh — guard persisten sudah aktif sejak awal run;
         # panggilan ini hanya memastikan guard hidup bila entry point lain
         # (test / pemanggilan langsung) belum menjalankan run_automation().
-        _start_sap_popup_guard(duration=30, interval=1.0)
+        _start_sap_popup_guard(duration=45, interval=1.0)
         logging.info("  Menunggu SAP GUI startup / SSO selesai...")
-        deadline = time.time() + 30
+        deadline = time.time() + 45
         sap_ready = False
 
         while time.time() < deadline:
@@ -3301,9 +3389,15 @@ class SapGuiAutomation:
                     sp        = _Path(save_path)
                     dir_part  = str(sp.parent) + '\\'
                     file_part = sp.name
-                    path_field.Text     = dir_part
-                    filename_field.Text = file_part
+                    try:
+                        path_field.Text = dir_part
+                    except Exception:
+                        pass
                     logging.info(f"    DY_PATH     = {dir_part}")
+                    try:
+                        filename_field.Text = file_part
+                    except Exception:
+                        pass
                     logging.info(f"    DY_FILENAME = {file_part}")
                 elif single_field:
                     single_field.Text = save_path
@@ -3315,6 +3409,21 @@ class SapGuiAutomation:
                 # Dismiss popup security sebelum konfirmasi
                 _dismiss_sap_security_popup_win32()
                 time.sleep(0.2)
+
+                # Also explicitly check known toolbar buttons in wnd[1] and root
+                for explicit_btn_id in [
+                    f"{root_id}/tbar[0]/btn[0]",
+                    f"{root_id}/tbar[0]/btn[11]",
+                    f"{root_id}/tbar[0]/btn[8]",
+                    f"{root_id}/usr/btn[0]",
+                    f"{root_id}/usr/btn[8]",
+                ]:
+                    try:
+                        eb = sess.findById(explicit_btn_id)
+                        if eb and eb not in buttons:
+                            buttons.append(eb)
+                    except Exception:
+                        pass
 
                 # Dump semua tombol yang ditemukan untuk debugging
                 for idx_b, btn in enumerate(buttons):
@@ -3336,11 +3445,12 @@ class SapGuiAutomation:
                         bid = str(getattr(btn, "Id",      "") or "").lower()
                         if (
                             txt in ("ok", "save", "simpan", "continue", "lanjut",
-                                    "execute", "generate", "transfer")
+                                    "execute", "generate", "transfer", "replace")
                             or "generate" in tip
                             or "execute"  in tip
                             or "transfer" in tip
                             or "save"     in tip
+                            or "replace"  in tip
                             or "btn[0]"  in bid
                             or "btn[8]"  in bid
                             or "btn[11]" in bid
@@ -3496,8 +3606,9 @@ class SapGuiAutomation:
                     sp = _Path(save_path)
                     dir_part = str(sp.parent) + '\\'
                     file_part = sp.name
-                    if _fill(path_field, dir_part) and _fill(filename_field, file_part):
-                        logging.info(f"    DY_PATH     = {dir_part}")
+                    _fill(path_field, dir_part)
+                    logging.info(f"    DY_PATH     = {dir_part}")
+                    if _fill(filename_field, file_part):
                         logging.info(f"    DY_FILENAME = {file_part}")
                     else:
                         continue
@@ -3730,6 +3841,8 @@ class SapGuiAutomation:
         # sedang ditulis). Nama file memuat timestamp detik, jadi tabrakan
         # dengan file run sebelumnya praktis tidak mungkin.
         target_path   = CONFIG['DOWNLOAD_DIR'] / filename
+        sap_dir       = Path.home() / 'Documents' / 'SAP' / 'SAP GUI'
+        sap_target    = sap_dir / filename
         # Kalau dialog Save sendiri tidak pernah terdeteksi, tidak ada gunanya
         # menunggu file 60 detik (perilaku lama: langsung gagal cepat).
         wait_seconds  = CONFIG['FILE_WAIT_SECONDS'] if dialog_found else 0
@@ -3740,14 +3853,41 @@ class SapGuiAutomation:
             # Popup bisa muncul telat (setelah dialog save ditutup) — terus
             # di-dismiss selama menunggu file, jangan hanya andalkan guard.
             _dismiss_sap_security_popup_win32()
+
             try:
-                cur_size = target_path.stat().st_size if target_path.exists() else 0
+                sess = self._get_sap_session()
+                sbar = sess.findById("wnd[0]/sbar")
+                status_type = str(getattr(sbar, "MessageType", "") or "").strip().upper()
+                status_text = str(getattr(sbar, "Text", "") or "").strip()
+                if status_type == 'E' and status_text:
+                    if 'reading object property' not in status_text.lower():
+                        logging.error(f"  SAP export status [E]: {status_text}")
+                        break
+                    else:
+                        logging.warning(f"  SAP non-fatal export notice [E]: {status_text} (mengabaikan error OLE viewer, tetap menunggu file...)")
+            except Exception:
+                pass
+
+            found_path = None
+            if target_path.exists():
+                found_path = target_path
+            elif sap_target.exists():
+                found_path = sap_target
+
+            try:
+                cur_size = found_path.stat().st_size if (found_path and found_path.exists()) else 0
             except OSError:
                 cur_size = 0
             if cur_size > 0 and cur_size == last_size:
                 logging.info(
                     f"  [V29] File Excel stabil: {filename} ({cur_size} bytes)"
                 )
+                if found_path != target_path:
+                    try:
+                        import shutil
+                        shutil.move(str(found_path), str(target_path))
+                    except Exception as e:
+                        logging.warning(f"  Gagal pindahkan file dari SAP GUI dir: {e}")
                 break
             if time.time() >= next_progress:
                 remaining=max(0, int(deadline_wait-time.time()))
@@ -3791,6 +3931,22 @@ class SapGuiAutomation:
                     return target
                 except Exception:
                     return latest
+
+        sap_dir = Path.home() / 'Documents' / 'SAP' / 'SAP GUI'
+        if sap_dir.exists():
+            cutoff   = time.time() - 300
+            sap_xlsx = sorted(
+                [f for f in sap_dir.glob('*.xls*') if f.stat().st_mtime > cutoff and f.stat().st_size > 0],
+                key=lambda p: p.stat().st_mtime, reverse=True
+            )
+            if sap_xlsx:
+                src = sap_xlsx[0]
+                try:
+                    import shutil
+                    shutil.move(str(src), str(target))
+                    return target
+                except Exception:
+                    return src
 
         win_dl = Path.home() / 'Downloads'
         if win_dl.exists():
@@ -3843,7 +3999,7 @@ def navigate_and_download_via_sap_gui() -> Path:
     date_to_str = date_to.strftime('%Y.%m.%d')
     logging.info(f"  Default range All Product ID: {date_from_str} s/d {date_to_str}")
 
-    filename      = f"{CONFIG['FILENAME_PREFIX']}_{today.strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename      = f"{CONFIG['FILENAME_PREFIX']}_{today.strftime('%Y%m%d_%H%M%S')}.xls"
 
     # FIX V29→V30: dulu guard durasi 600s (masih bisa EXPIRED di tengah run
     # panjang); sekarang no-op refresh — guard PERSISTEN aktif sejak awal
@@ -4039,7 +4195,7 @@ def cleanup_downloads(preserve_names=None):
                 logging.warning(f"  Gagal hapus {p.name}: {e}")
 
 
-def close_sap_after_success():
+def close_sap_after_success(force_all: bool = False):
     """
     Tutup semua proses SAP GUI setelah upload berhasil.
 
@@ -4060,12 +4216,12 @@ def close_sap_after_success():
     time.sleep(1)  # beri waktu guard dismiss popup yang sudah muncul
 
     # Terminate semua proses SAP langsung — tanpa COM call baru
-    sap_procs = ['saplogon.exe', 'sapgui.exe', 'saplgpad.exe', 'sapmsas.exe']
+    sap_procs = ['saplogon.exe', 'sapgui.exe', 'saplgpad.exe', 'sapmsas.exe', 'sapshcut.exe']
     killed = 0
     for proc in psutil.process_iter(['name', 'pid']):
         try:
             if ((proc.info['name'] or '').lower() in sap_procs
-                    and proc.info['pid'] not in _SERP_PRESERVE_SAP_PIDS):
+                    and (force_all or proc.info['pid'] not in _SERP_PRESERVE_SAP_PIDS)):
                 logging.info(f"    Terminate SAP: {proc.info['name']} (PID {proc.info['pid']})")
                 proc.terminate()
                 try:
@@ -4141,37 +4297,35 @@ def run_automation() -> bool:
         _stop_sap_popup_guard()
 
 
-def _wait_vpn_reconnect_serp(interval: int = 30, max_wait: float = None) -> bool:
-    """Tunggu sampai VPN tersambung kembali, cek tiap `interval` detik.
+def _wait_vpn_reconnect_serp(interval: int = 15, max_wait: float = None) -> bool:
+    """Tunggu sampai VPN tersambung (cek tiap `interval` detik).
 
-    FIX V23: sebelumnya loop INFINITE — kalau VPN putus di tengah proses
-    SERP dan tidak pernah kembali, worker menggantung selamanya menunggu
-    (log masih bertambah tiap 30s sehingga watchdog GUI tidak menyadarinya)
-    dan Run All sequential MACET di step SERP sampai hard timeout 1 jam
-    — persis laporan user "process all prod id selesai tapi tidak lanjut
-    proses berikutnya". Sekarang dibatasi max_wait (default env
-    SERP_VPN_MAX_WAIT_SECONDS, 900s / 15 menit): return True kalau VPN
-    kembali, False kalau menyerah — caller membatalkan run ini supaya
-    proses/jadwal berikutnya tetap jalan."""
+    Default max_wait = 0 (tunggu sampai VPN terhubung atau user klik Stop All).
+    Bisa dibatasi lewat env SERP_VPN_MAX_WAIT_SECONDS (>0) jika diperlukan."""
     import time as _time
     if max_wait is None:
         try:
-            max_wait = float(os.getenv('SERP_VPN_MAX_WAIT_SECONDS', '900'))
+            max_wait = float(os.getenv('SERP_VPN_MAX_WAIT_SECONDS', '0'))
         except Exception:
-            max_wait = 900.0
-    deadline = _time.time() + max_wait
+            max_wait = 0.0
+    logging.info("ACTIVITY Waiting for VPN")
+    logging.info(f"  Menunggu VPN terhubung... (cek tiap {interval}s)")
+    deadline = (_time.time() + max_wait) if max_wait and max_wait > 0 else None
+    last_log = _time.time()
     while True:
         _time.sleep(interval)
-        if check_vpn_connection():
-            logging.info("VPN terhubung kembali.")
+        if check_vpn_connection(quiet=True):
+            logging.info("VPN terhubung — melanjutkan proses.")
             return True
-        if _time.time() >= deadline:
+        if deadline is not None and _time.time() >= deadline:
             logging.error(
                 f"  VPN BELUM kembali setelah {int(max_wait)}s. Berhenti menunggu — "
                 f"run SERP ini dibatalkan supaya proses/jadwal berikutnya tetap jalan."
             )
             return False
-        logging.info(f"  Masih menunggu VPN... (cek lagi dalam {interval}s)")
+        if _time.time() - last_log >= 60:
+            logging.info(f"  Masih menunggu VPN... (cek lagi dalam {interval}s)")
+            last_log = _time.time()
 
 
 def _run_automation_once() -> bool:
@@ -4186,6 +4340,14 @@ def _run_automation_once() -> bool:
     global _SERP_PRESERVE_EXCEL_PIDS, _SERP_PRESERVE_SAP_PIDS
     _SERP_PRESERVE_EXCEL_PIDS = _process_pids_containing('excel')
     _SERP_PRESERVE_SAP_PIDS = _process_pids_containing('sap')
+    # Bersihkan sisa proses SAP zombie sebelum mulai
+    for proc in psutil.process_iter(['name', 'pid']):
+        try:
+            if (proc.info['name'] or '').lower() in {'saplogon.exe', 'sapgui.exe', 'saplgpad.exe', 'sapshcut.exe'}:
+                if proc.info['pid'] not in _SERP_PRESERVE_SAP_PIDS:
+                    proc.terminate()
+        except Exception:
+            pass
     try:
         run_start_names = {p.name for p in CONFIG['DOWNLOAD_DIR'].iterdir() if p.is_file()}
     except Exception:
@@ -4195,9 +4357,10 @@ def _run_automation_once() -> bool:
 
     try:
         logging.info("\n[1/6] Cek VPN...")
-        if not check_vpn_connection():
-            show_popup("VPN Required", "VPN tidak terhubung!\nConnect ke VPN dulu.", success=False)
-            return False
+        if not check_vpn_connection(quiet=True):
+            if not _wait_vpn_reconnect_serp(interval=15):
+                show_popup("VPN Required", "VPN tidak terhubung!\nConnect ke VPN dulu.", success=False)
+                return False
 
         logging.info("\n[2/6] Setup Chrome...")
         driver = setup_driver()
@@ -4323,6 +4486,11 @@ def _run_automation_once() -> bool:
         return False
 
     finally:
+        if not success:
+            try:
+                close_sap_after_success(force_all=True)
+            except Exception:
+                pass
         if driver:
             try:
                 if CONFIG['KEEP_OPEN_ON_ERR'] and not success and not CONFIG['HEADLESS']:

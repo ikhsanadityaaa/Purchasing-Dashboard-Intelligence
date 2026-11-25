@@ -6,6 +6,23 @@ in a local .env file and are never included in exports or ZIP artifacts.
 """
 from __future__ import annotations
 
+try:
+    import ssl
+    _orig_ssl_context_new = ssl.SSLContext.__new__
+    def _safe_ssl_context_new(cls, *args, **kwargs):
+        try:
+            return _orig_ssl_context_new(cls, *args, **kwargs)
+        except FileNotFoundError:
+            protocol = kwargs.get('protocol')
+            if not protocol and args:
+                protocol = args[0]
+            if protocol is None:
+                protocol = ssl.PROTOCOL_TLS
+            return ssl._SSLContext.__new__(cls, protocol)
+    ssl.SSLContext.__new__ = _safe_ssl_context_new
+except Exception:
+    pass
+
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import RLock, Thread, Event
@@ -21,6 +38,7 @@ import subprocess
 import sys
 import time
 import uuid
+from schedule_policy import DEFAULT_WORKING_HOURS, validate_working_hours, within_working_hours
 from desktop_secrets import CredentialStore
 from desktop_sheet_sync import VendorSnapshotStore, SheetSyncCoordinator
 from desktop_google_readonly import GoogleReadOnlyAccess
@@ -32,7 +50,7 @@ DEFAULT_RANGE = {'preset': '1month', 'start_date': '', 'end_date': 'today'}
 DEFAULT_SETTINGS = {'automation_enabled': False, 'windows_scheduler_enabled': False,
                     'schedules': [], 'run_history': {}, 'process_completed_at': {},
                     'process_ranges': {p: dict(DEFAULT_RANGE) for p in ('smro', 'serp', 'pur')},
-                    'headless': True}
+                    'headless': True, 'working_hours': dict(DEFAULT_WORKING_HOURS)}
 
 
 def validate_range(raw, legacy=False):
@@ -87,12 +105,8 @@ def describe_range(chosen, today=None):
 
 
 def user_data_dir() -> Path:
-    override = os.environ.get('SERVEONE_DATA_DIR')
-    if override:
-        return Path(override).expanduser().resolve()
-    if os.name == 'nt':
-        return Path(os.environ.get('LOCALAPPDATA', str(Path.home()/'AppData'/'Local'))) / 'ServeoneDashboardDesktop'
-    return Path.home() / '.serveone-dashboard-desktop'
+    from serveone_storage import data_dir
+    return data_dir()
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -144,6 +158,7 @@ class SettingsStore:
             self.data['automation_enabled'] = bool(loaded.get('automation_enabled', False))
             self.data['windows_scheduler_enabled'] = bool(loaded.get('windows_scheduler_enabled', False))
             self.data['headless'] = bool(loaded.get('headless', True))
+            self.data['working_hours'] = validate_working_hours(loaded.get('working_hours'))
             self.data['schedules']=[validate_schedule(v) for v in loaded.get('schedules', [])]
             self.data['run_history'] = loaded.get('run_history', {}) if isinstance(loaded.get('run_history', {}),dict) else {}
             completed = loaded.get('process_completed_at', {})
@@ -158,12 +173,14 @@ class SettingsStore:
             return {'automation_enabled':self.data['automation_enabled'],
                     'windows_scheduler_enabled':self.data['windows_scheduler_enabled'],
                     'headless':self.data['headless'],
+                    'working_hours':copy.deepcopy(self.data['working_hours']),
                     'schedules':copy.deepcopy(self.data['schedules']),
                     'process_completed_at':copy.deepcopy(self.data['process_completed_at']),
                     'process_ranges':copy.deepcopy(self.data['process_ranges'])}
 
-    def save(self, automation_enabled, schedules, windows_scheduler_enabled=False, process_ranges=None, headless=True):
+    def save(self, automation_enabled, schedules, windows_scheduler_enabled=False, process_ranges=None, headless=True, working_hours=None):
         if not isinstance(schedules,list) or len(schedules)>120: raise ValueError('Too many schedules')
+        hours=validate_working_hours(working_hours if working_hours is not None else self.data['working_hours'])
         normalized=[validate_schedule(v) for v in schedules]
         normalized_ranges = {p:validate_range((process_ranges or self.data['process_ranges']).get(p, DEFAULT_RANGE))
                              for p in ('smro','serp','pur')}
@@ -181,6 +198,7 @@ class SettingsStore:
                     # Avoid firing overdue newly-created daily/interval jobs immediately.
                     self.data['run_history'][s['id']]=datetime.now().isoformat(timespec='seconds')
             self.data['automation_enabled']=bool(automation_enabled)
+            self.data['working_hours']=hours
             self.data['windows_scheduler_enabled']=bool(windows_scheduler_enabled and automation_enabled)
             self.data['schedules']=normalized
             self.data['process_ranges']=normalized_ranges
@@ -202,6 +220,7 @@ class SettingsStore:
     def due(self, now:datetime):
         with self.lock:
             if not self.data['automation_enabled'] or self.data['windows_scheduler_enabled']: return []
+            if not within_working_hours(self.data['working_hours'], now): return []
             due=[]
             for s in self.data['schedules']:
                 if not s['enabled']:continue
@@ -215,6 +234,13 @@ class SettingsStore:
                     if s['mode']=='daily' or now.weekday() in s['days']:
                         due.append(s)
             return due
+
+    def update(self, **kwargs):
+        with self.lock:
+            for k, v in kwargs.items():
+                if k in self.data:
+                    self.data[k] = v
+            atomic_json(self.path, self.data)
 
 
 class DesktopRuntime:
@@ -253,16 +279,60 @@ class DesktopRuntime:
         self.batch_failed=False
         self.cancel_requested=False
         self.process_errors={p:'' for p in ('smro','serp','pur')}
+        self._run_queue=[]
+        self.cleanup_disk_artifacts()
+
+    def cleanup_disk_artifacts(self):
+        """Cleans up temporary Chrome profiles, worker download remnants, and stale snapshots to prevent disk bloat."""
+        try:
+            import shutil, tempfile
+            for cp_dir in (self.data_dir / 'chrome_profiles', self.data_dir / 'downloads' / 'chrome_profiles', Path(tempfile.gettempdir()) / 'serveone_chrome_serp'):
+                if cp_dir.exists():
+                    for item in list(cp_dir.iterdir()):
+                        if item.is_dir() and not item.name.startswith('.'):
+                            try:
+                                if time.time() - item.stat().st_mtime > 60:
+                                    shutil.rmtree(item, ignore_errors=True)
+                            except Exception:
+                                pass
+            dl_dir = self.data_dir / 'downloads'
+            if dl_dir.exists():
+                for item in list(dl_dir.iterdir()):
+                    if item.is_dir() and item.name.startswith('worker_'):
+                        try:
+                            for f in list(item.iterdir()):
+                                try: f.unlink()
+                                except Exception: pass
+                            item.rmdir()
+                        except Exception:
+                            pass
+            sn_dir = self.data_dir / 'instance' / 'dashboard_snapshots'
+            if sn_dir.exists():
+                for sn in list(sn_dir.glob('*.json')):
+                    try:
+                        with open(sn, 'r', encoding='utf-8') as fh:
+                            d = json.load(fh)
+                            pl = d.get('payload', {})
+                            if isinstance(pl, dict) and (pl.get('total_so_count') is None or pl.get('total_so_count') == 0):
+                                sn.unlink()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def log(self, message):
         line=f'[{datetime.now().isoformat(timespec="seconds")}] {message}\n'
         with self.lock:
-            with self.logfile.open('a',encoding='utf-8') as f:f.write(line)
+            try:
+                self.logfile.parent.mkdir(parents=True, exist_ok=True)
+                with self.logfile.open('a',encoding='utf-8') as f:f.write(line)
+            except OSError:
+                pass
 
     def status_payload(self):
         with self.lock:
             p=self.running
-            alive=bool((p and p.poll() is None) or self.batch_active)
+            alive=bool((p and p.poll() is None) or self.batch_active or bool(self._run_queue))
             settings=self.store.public()
             return {'process_statuses':dict(self.process_statuses),
                     'process_progress':dict(self.process_progress),
@@ -274,6 +344,7 @@ class DesktopRuntime:
                     'version':'V63.27.73-desktop-preview','status':'running' if alive else self.status,
                     'current_process':(PROCESSES.get(self.current_process_id,self.status) if alive else None),
                     'last_error':self.last_error,'running':alive,'storage':str(self.data_dir),
+                    'queued_count':len(self._run_queue),
                     'offline_import':True,'scheduled_while_closed':settings['windows_scheduler_enabled']}
 
     @staticmethod
@@ -326,7 +397,10 @@ class DesktopRuntime:
         if 'run all complete with errors' in lower:return 'Completed with errors'
         if 'transient browser blob entries omitted' in lower:return 'Browser noise hidden'
         if re.search(r'\b(stop|stopped|cancel|cancelled|dibatalkan|dihentikan)\b', lower):return 'Stopping'
-        if 'vpn' in lower:return 'VPN connected' if re.search(r'(connected|terhubung)', lower) else 'Waiting for VPN'
+        if 'vpn' in lower:
+            if re.search(r'(menunggu|waiting|belum|tidak terhubung|putus|terputus|disconnected|not connected)', lower):
+                return 'Waiting for VPN'
+            return 'VPN connected' if re.search(r'(connected|terhubung|tersambung)', lower) else 'Waiting for VPN'
         if re.search(r'(retry|mencoba ulang|coba lagi|attempt \d+)', lower):return 'Retrying' + (f' | attempt {attempt.group(1)}/{attempt.group(2)}' if attempt else '')
         if re.search(r'(sqlite|database|saved locally|disimpan lokal|saving)', lower):return 'Saving data'
         if re.search(r'(excel|\.xls\b|\.xlsx\b|download)', lower):return 'Downloading data'
@@ -439,8 +513,18 @@ class DesktopRuntime:
         child.terminate()
 
     def stop_all(self):
-        """Explicit user cancellation; stop active worker tree and skip pending batch."""
+        """Explicit user cancellation; stop active worker tree and clear queued jobs."""
         with self.lock:
+            for job in self._run_queue:
+                p = job['process']
+                if p == 'all':
+                    for sp in ('smro','serp','pur'):
+                        self.process_statuses[sp] = 'cancelled'
+                        self.process_progress[sp] = 'Stopped'
+                else:
+                    self.process_statuses[p] = 'cancelled'
+                    self.process_progress[p] = 'Stopped'
+            self._run_queue.clear()
             if not self.batch_active and not (self.running and self.running.poll() is None):
                 return self.status_payload()
             self.cancel_requested = True
@@ -460,27 +544,66 @@ class DesktopRuntime:
                     self.log('Stop fallback warning: ' + str(fallback_exc)[:150])
         return self.status_payload()
 
-    def launch(self, process:str, schedule_id=None, date_range=None, ranges_override=None):
+    def launch(self, process:str, schedule_id=None, date_range=None, ranges_override=None, wait_if_busy=True, headless_override=None):
         if process not in PROCESSES: raise ValueError('Invalid automation process')
         if not self.store.public()['automation_enabled']:
             raise PermissionError('Enable automation in Auto Update settings first')
+        if schedule_id and not within_working_hours(self.store.public()['working_hours']):
+            self.log('ACTIVITY Skipped | Outside working hours')
+            raise ValueError('Outside working hours')
         # Never start a worker with blank/forgotten credentials.
         username, password = self.credentials.load()
         if not username or not password:
             raise ValueError('SMRO ID/password missing. Save credentials in Auto Update > Processes first.')
         with self.lock:
-            if self.batch_active or (self.running is not None and self.running.poll() is None):
-                raise RuntimeError('Another automation is still running')
+            is_busy = bool(self.batch_active or (self.running is not None and self.running.poll() is None))
+            if is_busy:
+                if not wait_if_busy:
+                    raise RuntimeError('Another automation is still running')
+                if process == 'all':
+                    for p in ('smro','serp','pur'):
+                        if self.process_statuses.get(p) != 'running':
+                            self.process_statuses[p] = 'queued'
+                            self.process_progress[p] = 'Waiting'
+                else:
+                    self.process_statuses[process] = 'queued'
+                    self.process_progress[process] = 'Waiting'
+                if schedule_id:
+                    self.store.note_run(schedule_id)
+                self._run_queue.append({
+                    'process': process,
+                    'schedule_id': schedule_id,
+                    'date_range': date_range,
+                    'ranges_override': ranges_override,
+                    'username': username,
+                    'password': password,
+                    'headless_override': headless_override
+                })
+                self.log(f'ACTIVITY Queued | Process: {PROCESSES[process]} | Waiting for current automation to finish')
+                return self.status_payload()
+            return self._start_execution(process, schedule_id, date_range, ranges_override, username, password, headless_override=headless_override)
+
+    def _start_execution(self, process:str, schedule_id=None, date_range=None, ranges_override=None, username=None, password=None, headless_override=None):
+        with self.lock:
+            if schedule_id and not within_working_hours(self.store.public()['working_hours']):
+                self.log('ACTIVITY Skipped | Outside working hours')
+                self.process_statuses[process] = 'skipped'
+                self.process_progress[process] = 'Outside working hours'
+                self._pump_queue()
+                return self.status_payload()
             if getattr(sys,'frozen',False):
                 command=[sys.executable,'--worker',process]
             else:
                 command=[sys.executable,str(self.source_dir/'desktop_launcher.py'),'--worker',process]
             env=os.environ.copy()
+            env.pop('SERVEONE_SCHEDULE_ID', None)
+            if schedule_id:env['SERVEONE_SCHEDULE_ID']=schedule_id
             env['SMRO_USERNAME']=username
             env['SMRO_PASSWORD']=password
             env['SMRO_SHOW_POPUP']='false'
+            headless = bool(self.store.public()['headless']) if headless_override is None else bool(headless_override)
             for prefix in ('SMRO','SERP','PUR_INFO_REG'):
-                env[prefix+'_HEADLESS']='true' if self.store.public()['headless'] else 'false'
+                env[prefix+'_HEADLESS']='true' if headless else 'false'
             env['NO_PROXY']='127.0.0.1,localhost'
             env['no_proxy']='127.0.0.1,localhost'
             # Hard override: old remote upload endpoints can never be used.
@@ -543,7 +666,6 @@ class DesktopRuntime:
             else:
                 self.batch_failed=False
                 self.batch_active=False
-                self.process_statuses={p:'idle' for p in ('smro','serp','pur')}
                 self.process_statuses[process]='running'
                 self.process_progress[process]='Starting'
                 self.current_process_id=process
@@ -598,7 +720,7 @@ class DesktopRuntime:
                 return rc
             if process!='all':
                 try:
-                    worker_offset=self.logfile.stat().st_size
+                    worker_offset=self.logfile.stat().st_size if self.logfile.exists() else 0
                     self.running=spawn(process)
                 except Exception:
                     self.process_statuses[process]='failed'
@@ -624,7 +746,7 @@ class DesktopRuntime:
                         self.log(f'ACTIVITY Started | Process: {PROCESSES[one]} | Range: {describe_range(selected_ranges[one])} | Trigger: {trigger} | Mode: {display_mode}')
                     try:
                         with self.lock:
-                            child_offset=self.logfile.stat().st_size
+                            child_offset=self.logfile.stat().st_size if self.logfile.exists() else 0
                             if self.cancel_requested:
                                 self.process_statuses[one]='cancelled'
                                 continue
@@ -636,10 +758,18 @@ class DesktopRuntime:
                         self.process_errors[one]=(type(exc).__name__+': '+str(exc))[:240]
                         self.log('ERROR '+PROCESSES[one]+': '+str(exc)[:180])
                     with self.lock:
+                        if rc == 75:
+                            self.process_statuses[one]='skipped'
+                            self.process_progress[one]='Outside working hours'
+                            self.running=None
+                            self.log('ACTIVITY Skipped | Outside working hours')
+                            continue
                         cancelled=self.cancel_requested
                         self.process_statuses[one]='cancelled' if cancelled else ('completed' if rc==0 else 'failed')
                         self.process_progress[one]='Stopped' if cancelled else ('Completed' if rc==0 else 'Failed')
-                        if rc==0 and not cancelled:self.store.note_completed(one)
+                        if rc==0 and not cancelled:
+                            self.store.note_completed(one)
+                            self._notify_data_updated()
                         self.running=None
                         if rc and not cancelled:
                             had_failure=True
@@ -657,39 +787,89 @@ class DesktopRuntime:
                     self.status='stopped' if self.cancel_requested else ('error' if had_failure else 'idle')
                     result='Stopped' if self.cancel_requested else ('Completed with errors' if had_failure else 'Success')
                     self.log(f'ACTIVITY Run All finished | Result: {result}')
+                self._pump_queue()
             Thread(target=run_batch,daemon=True,name='serveone-run-all').start()
         else:
             def finished():
                 rc=wait_child(runner)
                 with self.lock:
-                    cancelled=self.cancel_requested
-                    self.process_statuses[process]='cancelled' if cancelled else ('completed' if rc==0 else 'failed')
-                    self.process_progress[process]='Stopped' if cancelled else ('Completed' if rc==0 else 'Failed')
-                    if rc==0 and not cancelled:self.store.note_completed(process)
-                    if rc and not cancelled:
-                        self.status='error'
-                        reason=self._failure_reason(worker_offset,rc)
-                        self.process_errors[process]=reason
-                        self.last_error=f'{PROCESSES[process]}: {reason}'
-                        self.log('FAILURE '+PROCESSES[process]+': '+reason)
+                    if rc == 75:
+                        self.process_statuses[process]='skipped'
+                        self.process_progress[process]='Outside working hours'
+                        self.current_process_id=None
+                        self.running=None
+                        self.status='idle'
+                        self.log('ACTIVITY Skipped | Outside working hours')
                     else:
-                        self.status='stopped' if cancelled else 'idle'
-                    self.current_process_id=None
-                    self.running=None
-                    result='Stopped' if cancelled else ('Success' if rc==0 else 'Failed')
-                    detail=f' | Error: {reason}' if rc and not cancelled else ''
-                    self.log(f'ACTIVITY Finished | Process: {PROCESSES[process]} | Result: {result}{detail}')
+                        cancelled=self.cancel_requested
+                        self.process_statuses[process]='cancelled' if cancelled else ('completed' if rc==0 else 'failed')
+                        self.process_progress[process]='Stopped' if cancelled else ('Completed' if rc==0 else 'Failed')
+                        if rc==0 and not cancelled:
+                            self.store.note_completed(process)
+                            self._notify_data_updated()
+                        if rc and not cancelled:
+                            self.status='error'
+                            reason=self._failure_reason(worker_offset,rc)
+                            self.process_errors[process]=reason
+                            self.last_error=f'{PROCESSES[process]}: {reason}'
+                            self.log('FAILURE '+PROCESSES[process]+': '+reason)
+                        else:
+                            self.status='stopped' if cancelled else 'idle'
+                        self.current_process_id=None
+                        self.running=None
+                        result='Stopped' if cancelled else ('Success' if rc==0 else 'Failed')
+                        detail=f' | Error: {reason}' if rc and not cancelled else ''
+                        self.log(f'ACTIVITY Finished | Process: {PROCESSES[process]} | Result: {result}{detail}')
+                self._pump_queue()
             Thread(target=finished,daemon=True).start()
         if schedule_id:self.store.note_run(schedule_id)
         return self.status_payload()
+
+    def _notify_data_updated(self):
+        """Force-clear backend response caches and publish a new data revision
+        so open UI tabs immediately reload fresh SQLite data after automation."""
+        try:
+            backend=sys.modules.get('app')
+            if backend is not None:
+                if hasattr(backend,'clear_runtime_caches'):
+                    try: backend.clear_runtime_caches(force_hard=True)
+                    except TypeError: backend.clear_runtime_caches()
+                if hasattr(backend,'_publish_data_revision'):
+                    backend._publish_data_revision()
+        except Exception:
+            pass
+
+    def _pump_queue(self):
+        with self.lock:
+            if self.cancel_requested:
+                for job in self._run_queue:
+                    p = job['process']
+                    if p == 'all':
+                        for sp in ('smro','serp','pur'):
+                            self.process_statuses[sp] = 'cancelled'
+                            self.process_progress[sp] = 'Stopped'
+                    else:
+                        self.process_statuses[p] = 'cancelled'
+                        self.process_progress[p] = 'Stopped'
+                self._run_queue.clear()
+                return
+            if not self._run_queue:
+                self.cleanup_disk_artifacts()
+                return
+            next_job = self._run_queue.pop(0)
+            self.log(f'ACTIVITY Started from queue | Process: {PROCESSES[next_job["process"]]}')
+            self._start_execution(**next_job)
 
     def scheduler_loop(self):
         while not self.stop.wait(15):
             try:
                 for s in self.store.due(datetime.now()):
-                    if not self.status_payload()['running']:
-                        self.launch(s['process'],schedule_id=s['id'])
-                        break
+                    with self.lock:
+                        queued_sids = {j.get('schedule_id') for j in self._run_queue}
+                        if s['id'] in queued_sids:
+                            continue
+                    self.launch(s['process'],schedule_id=s['id'])
+                    break
             except Exception as e:
                 self.log('Scheduler error: '+str(e)[:150])
 
@@ -708,8 +888,16 @@ def register_desktop_routes(app, runtime:DesktopRuntime):
         host = request.host.split(':')[0]
         if host not in ('127.0.0.1','localhost','[::1]'):
             return jsonify({'error':'Localhost only'}),403
-        if request.path.startswith('/desktop/bootstrap/'):
+        if request.path.startswith('/desktop/bootstrap/') or request.path.startswith('/api/vendor-control/login/') or request.path.startswith('/api/desktop/save-download'):
             return None
+        # Allow internal in-process SWR/warmup GET replays via Flask test_client().
+        # _SWR_FORCE_LOCAL is a thread-local flag set only inside _swr_refresh/_run_warmup_pass
+        # and can never be triggered by external HTTP requests.
+        if request.method == 'GET':
+            import sys as _sys
+            backend=_sys.modules.get('app')
+            if backend is not None and getattr(getattr(backend,'_SWR_FORCE_LOCAL',None),'on',False):
+                return None
         # Local worker: a distinct per-run capability accepted ONLY on the three
         # import endpoints. Browser tokens are never accepted on external hosts.
         worker_routes = ('/api/upload/smro','/api/upload/product-id',
@@ -763,10 +951,11 @@ def register_desktop_routes(app, runtime:DesktopRuntime):
     @app.after_request
     def desktop_response_headers(response):
         # Keep company data and assets within the bundled desktop shell.
+        form_action = "'self' https://mall.serveone.id" if request.path.startswith('/api/vendor-control/login/') else "'self'"
         response.headers['Content-Security-Policy'] = (
             "default-src 'self' data: blob:; connect-src 'self'; img-src 'self' data: blob:; "
             "font-src 'self' data:; script-src 'self' 'unsafe-inline' blob:; "
-            "style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+            f"style-src 'self' 'unsafe-inline'; form-action {form_action}; frame-ancestors 'none'"
         )
         response.headers['X-Content-Type-Options']='nosniff'
         if (request.method=='GET' and response.status_code==200
@@ -788,7 +977,7 @@ def register_desktop_routes(app, runtime:DesktopRuntime):
     def desktop_bootstrap(key):
         if not hmac.compare_digest(key,runtime.session_key): return jsonify({'error':'Unauthorized'}),403
         response=make_response(redirect('/'))
-        response.set_cookie('serveone_desktop_session',key,httponly=True,samesite='Strict',secure=False,path='/')
+        response.set_cookie('serveone_desktop_session',key,httponly=True,samesite='Lax',secure=False,path='/')
         response.headers['Cache-Control']='no-store'
         return response
 
@@ -796,13 +985,21 @@ def register_desktop_routes(app, runtime:DesktopRuntime):
     def desktop_assets(filename):
         return send_from_directory(str(runtime.source_dir/'dashboard'/'static'/'desktop'),filename)
 
+    @app.route('/api/desktop/vendor-login/<path:row_key>', methods=['POST'])
+    def desktop_vendor_login(row_key):
+        import webbrowser
+        from urllib.parse import quote
+        url = f'http://127.0.0.1:{runtime.port}/api/vendor-control/login/{quote(str(row_key), safe="")}'
+        webbrowser.open(url)
+        return jsonify({'ok': True, 'url': url})
+
     @app.route('/api/desktop/settings',methods=['GET','PUT'])
     def desktop_settings():
         if request.method=='GET':return jsonify(runtime.store.public())
         try:
             j=request.get_json(silent=True) or {}
             return jsonify(runtime.store.save(j.get('automation_enabled',False), j.get('schedules',[]),
-                j.get('windows_scheduler_enabled',False),j.get('process_ranges'),j.get('headless',True)))
+                j.get('windows_scheduler_enabled',False),j.get('process_ranges'),j.get('headless',True),j.get('working_hours')))
         except (ValueError,TypeError) as e:return jsonify({'error':str(e)}),400
 
     @app.route('/api/desktop/credentials',methods=['GET','PUT'])
@@ -959,7 +1156,11 @@ def register_desktop_routes(app, runtime:DesktopRuntime):
                 import sys
                 backend=sys.modules.get('app')
                 if backend is not None and not getattr(backend._UPLOAD_JOB_EXECUTING,'on',False):
-                    backend._soft_invalidate_response_caches()
+                    if hasattr(backend,'clear_runtime_caches'):
+                        try: backend.clear_runtime_caches(force_hard=True)
+                        except TypeError: backend.clear_runtime_caches()
+                    else:
+                        backend._soft_invalidate_response_caches()
                     backend._publish_data_revision()
             except (AttributeError, OSError) as exc:
                 app.logger.warning('Could not publish desktop data revision: %s',exc)
@@ -979,6 +1180,9 @@ def register_desktop_routes(app, runtime:DesktopRuntime):
     def desktop_run():
         try:
             j=request.get_json(silent=True) or {}
+            headless_override = j.get('headless')
+            if headless_override is not None:
+                runtime.store.update(headless=bool(headless_override))
             date_range = j.get('date_range')
             if date_range is not None:
                 validate_range(date_range)
@@ -988,7 +1192,8 @@ def register_desktop_routes(app, runtime:DesktopRuntime):
                 for key, value in overrides.items():
                     if key not in ('smro','serp','pur'):raise ValueError('Unknown range process')
                     validate_range(value)
-            return jsonify(runtime.launch(str(j.get('process','')),date_range=date_range,ranges_override=overrides)),202
+            return jsonify(runtime.launch(str(j.get('process','')),date_range=date_range,ranges_override=overrides,headless_override=headless_override)),202
         except PermissionError as e:return jsonify({'error':str(e)}),403
         except RuntimeError as e:return jsonify({'error':str(e)}),409
         except ValueError as e:return jsonify({'error':str(e)}),400
+        except Exception as e:return jsonify({'error':str(e)}),500

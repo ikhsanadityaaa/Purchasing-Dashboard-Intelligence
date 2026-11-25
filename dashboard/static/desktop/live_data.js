@@ -16,6 +16,18 @@
       if(revision!==seen){
         seen=revision;
         latestReceived=Date.now();
+        try{
+          for(let k of Object.keys(localStorage)){
+            if(k&&(k.indexOf('po-monitoring:dashboard-')===0||k.indexOf('serveone:ps:')===0)){
+              localStorage.removeItem(k);
+            }
+          }
+          for(let sk of Object.keys(sessionStorage)){
+            if(sk&&(sk.indexOf('po-monitoring:dashboard-')===0||sk.indexOf('serveone:ps:')===0)){
+              sessionStorage.removeItem(sk);
+            }
+          }
+        }catch(_){}
         // React view refresh is in the V63 bundle's mounted App useEffect.
         window.dispatchEvent(new CustomEvent('serveone:data-changed',{detail:{revision}}));
         // SWR backend may return a stale response while aggregate caches rebuild.

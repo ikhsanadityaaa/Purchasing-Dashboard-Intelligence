@@ -34,6 +34,9 @@ function shell(){
   </section>
   <section class="zd-page" id="zd-tab-scheduler" hidden>
    <div class="zd-panel"><div class="zd-row"><div><div class="zd-section">Schedule Settings</div><div class="zd-muted">Add multiple schedules without replacing previous schedules.</div></div></div>
+   <label class="zd-toggle zd-task-toggle"><input id="zd-working-hours" type="checkbox" checked> Only scheduled updates during working hours (Mon-Fri)</label>
+   <div class="zd-fields"><div class="zd-field"><label for="zd-work-start">Start</label><input id="zd-work-start" type="time" value="07:00"></div><div class="zd-field"><label for="zd-work-end">End (exclusive)</label><input id="zd-work-end" type="time" value="17:00"></div><div class="zd-field"><label for="zd-work-zone">Timezone</label><select id="zd-work-zone"><option>Asia/Jakarta</option><option>Asia/Makassar</option><option>Asia/Jayapura</option><option>Asia/Bangkok</option></select></div></div>
+   <div class="zd-muted">Running imports finish safely. Queued jobs recheck hours before starting. Manual runs remain available.</div>
    <label class="zd-toggle zd-task-toggle"><input id="zd-win-task" type="checkbox"> Continue scheduled updates when the dashboard is closed (Windows Task Scheduler)</label>
    <div class="zd-fields"><div class="zd-field"><label for="zd-process">Process</label><select id="zd-process">${Object.entries(NAMES).map(([p,n])=>`<option value="${p}">${n}</option>`).join('')}</select></div>
    <div class="zd-field"><label for="zd-mode">Schedule Type</label><select id="zd-mode"><option value="daily">Daily</option><option value="weekly">Custom Days</option><option value="interval">Every N Minutes</option></select></div>
@@ -55,6 +58,7 @@ function shell(){
  $('#zd-close').onclick=$('#zd-cancel').onclick=()=>openPanel(false);
  $('#zd-refresh').onclick=poll;$('#zd-copy-log').onclick=copyLog;$('#zd-clear-log').onclick=clearLog;$('#zd-stop-all').onclick=stopAll;$('#zd-save').onclick=save;$('#zd-save-credentials').onclick=async()=>{try{await saveCredentials();}catch(e){status('Account save failed: '+e.message,true);}};
  $('#zd-check-local-data').onclick=checkLocalData;
+ const headlessToggle=$('#zd-headless');if(headlessToggle)headlessToggle.onchange=async()=>{try{await save();}catch(_){}};
  $('#zd-add').onclick=addSchedule;$('#zd-mode').onchange=changeMode;$('#zd-process').onchange=updateScheduleRange;
  $('#zd-password-toggle').onclick=()=>{const input=$('#zd-password');const visible=input.type==='text';input.type=visible?'password':'text';$('#zd-password-toggle').textContent=visible?'Show':'Hide';};
  dialog.addEventListener('mousedown',e=>{if(e.target===dialog)openPanel(false);});
@@ -85,10 +89,11 @@ async function loadCredentials(){const result=await api('/api/desktop/credential
 async function saveCredentials(){const id=$('#zd-username').value.trim(),password=$('#zd-password').value;if(!id)throw Error('Enter SMRO ID.');if(!password&&configured&&id===username)return;
  const result=await api('/api/desktop/credentials',jsonOpts({username:id,password}));configured=!!result.configured;username=result.username;$('#zd-password').value='';$('#zd-password').placeholder='Saved securely · enter to change';$('#zd-credential-state').textContent='Account saved';status('SMRO account saved securely for this Windows user.');}
 async function maybeSaveCredentials(){if($('#zd-password').value||$('#zd-username').value.trim()!==username)await saveCredentials();}
-async function save(){try{await maybeSaveCredentials();ranges=Object.fromEntries(PROCESSES.map(p=>[p,getRange('zd-'+p)]));const payload={automation_enabled:$('#zd-enabled').checked,windows_scheduler_enabled:$('#zd-win-task').checked,headless:$('#zd-headless').checked,process_ranges:ranges,schedules};const data=await api('/api/desktop/settings',jsonOpts(payload));schedules=data.schedules||[];renderList();status('Settings saved locally.');}catch(e){status('Save failed: '+e.message,true);}}
+async function save(){try{await maybeSaveCredentials();ranges=Object.fromEntries(PROCESSES.map(p=>[p,getRange('zd-'+p)]));const payload={working_hours:{enabled:$('#zd-working-hours').checked,start:$('#zd-work-start').value,end:$('#zd-work-end').value,timezone:$('#zd-work-zone').value,days:[0,1,2,3,4]},automation_enabled:$('#zd-enabled').checked,windows_scheduler_enabled:$('#zd-win-task').checked,headless:$('#zd-headless').checked,process_ranges:ranges,schedules};const data=await api('/api/desktop/settings',jsonOpts(payload));schedules=data.schedules||[];renderList();status('Settings saved locally.');}catch(e){status('Save failed: '+e.message,true);}}
 async function run(process){
  try{
   await maybeSaveCredentials();
+  await save();
   if(!configured)throw Error('Save SMRO ID and password before running automation.');
   // Every Run All must use exactly the choices currently visible in Processes,
   // not an independent or stale Scheduler range.
@@ -96,9 +101,10 @@ async function run(process){
   // Run uses the current editor values, even before Save Settings.
   // Persisting settings is a separate explicit action.
   const date_range=process==='all'?null:edited[process];
+  const isHeadless=$('#zd-headless')?$('#zd-headless').checked:true;
   status('Starting '+NAMES[process]+'...');
   await api('/api/desktop/run',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({process,date_range,process_ranges:process==='all'?edited:undefined})});
+    body:JSON.stringify({process,date_range,process_ranges:process==='all'?edited:undefined,headless:isHeadless})});
   status('Local processing started: '+NAMES[process]+'. Open Activity Log to follow progress.');
   await poll();
  }catch(e){status('Run failed: '+e.message,true);await poll();}
@@ -145,15 +151,29 @@ function updateRunButtons(state){
  dialog.querySelectorAll('button[data-run]').forEach(btn=>{
   const id=btn.dataset.run;
   if(!btn.dataset.idleLabel)btn.dataset.idleLabel=btn.innerHTML;
-  const active=running && (id==='all'?all:state.current_process_id===id);
-  btn.disabled=running;
-  btn.classList.toggle('zd-running',active);
-  btn.innerHTML=active?'<span class="zd-spinner" aria-hidden="true"></span> '+(id==='all'?'Running All...':'Running...'):btn.dataset.idleLabel;
-  btn.setAttribute('aria-busy',active?'true':'false');
+  const isRunning=running && (id==='all'?all:state.current_process_id===id);
+  const isQueued=(id==='all'?(all&&!isRunning):stepStates[id]==='queued');
+  const busy=isRunning||isQueued;
+  btn.classList.toggle('zd-running',busy);
+  if(isRunning){
+   btn.disabled=true;
+   btn.innerHTML='<span class="zd-spinner" aria-hidden="true"></span> '+(id==='all'?'Running All...':'Running...');
+  }else if(isQueued){
+   btn.disabled=true;
+   btn.innerHTML='<span class="zd-spinner" aria-hidden="true"></span> Waiting...';
+  }else if(all){
+   btn.disabled=true;
+   btn.innerHTML=btn.dataset.idleLabel;
+  }else{
+   btn.disabled=false;
+   btn.innerHTML=btn.dataset.idleLabel;
+  }
+  btn.setAttribute('aria-busy',busy?'true':'false');
  });
 }
-async function poll(){if(!dialog||dialog.hidden)return;try{const [state,logs]=await Promise.all([api('/api/desktop/status'),api('/api/desktop/logs')]);$('#zd-run-status').textContent=state.batch_active?'Run All: '+(state.current_process||'Preparing'):state.running?'Processing locally: '+state.status:state.status==='error'?'Last run failed: '+(state.last_error||'Open Activity Log'):state.status==='stopped'?'Stopped by user':'Local database';updateRunButtons(state);$('#zd-run-status').classList.toggle('zd-pill-error',state.status==='error');updateLogs(logs.lines);}catch(e){status('Status unavailable: '+e.message,true);}}
-async function refresh(){try{const [settings]=await Promise.all([api('/api/desktop/settings'),loadCredentials()]);schedules=settings.schedules||[];ranges=settings.process_ranges||defaultRanges();$('#zd-enabled').checked=!!settings.automation_enabled;$('#zd-win-task').checked=!!settings.windows_scheduler_enabled;$('#zd-headless').checked=settings.headless!==false;PROCESSES.forEach(p=>setRange('zd-'+p,ranges[p]));renderList();status('Settings loaded.');await poll();}catch(e){status('Cannot load settings: '+e.message,true);}clearInterval(timer);timer=setInterval(poll,2500);}
+let zdWasRunning=false;
+async function poll(){if(!dialog||dialog.hidden)return;try{const [state,logs]=await Promise.all([api('/api/desktop/status'),api('/api/desktop/logs')]);const isRunning=Boolean(state.running||state.batch_active);if(zdWasRunning&&!isRunning&&state.status!=='error'&&state.status!=='stopped'){window.dispatchEvent(new CustomEvent('serveone:data-changed',{detail:{source:'automation',process:state.current_process_id||'automation'}}));}zdWasRunning=isRunning;$('#zd-run-status').textContent=state.batch_active?'Run All: '+(state.current_process||'Preparing'):state.running?'Processing locally: '+state.status+(state.queued_count?' ('+state.queued_count+' queued)':'') :state.status==='error'?'Last run failed: '+(state.last_error||'Open Activity Log'):state.status==='stopped'?'Stopped by user':'Local database';updateRunButtons(state);$('#zd-run-status').classList.toggle('zd-pill-error',state.status==='error');updateLogs(logs.lines);}catch(e){status('Status unavailable: '+e.message,true);}}
+async function refresh(){try{const [settings]=await Promise.all([api('/api/desktop/settings'),loadCredentials()]);const hours=settings.working_hours||{enabled:true,start:'07:00',end:'17:00',timezone:'Asia/Jakarta'};$('#zd-working-hours').checked=hours.enabled;$('#zd-work-start').value=hours.start;$('#zd-work-end').value=hours.end;$('#zd-work-zone').value=hours.timezone;schedules=settings.schedules||[];ranges=settings.process_ranges||defaultRanges();$('#zd-enabled').checked=!!settings.automation_enabled;$('#zd-win-task').checked=!!settings.windows_scheduler_enabled;$('#zd-headless').checked=settings.headless!==false;PROCESSES.forEach(p=>setRange('zd-'+p,ranges[p]));renderList();status('Settings loaded.');await poll();}catch(e){status('Cannot load settings: '+e.message,true);}clearInterval(timer);timer=setInterval(poll,2500);}
 function placeButton(){
  const manual=[...document.querySelectorAll('button')].find(btn=>/^\s*Manual Update\s*$/i.test(btn.textContent||''));
  if(!manual)return;

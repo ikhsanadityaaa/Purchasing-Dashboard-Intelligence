@@ -4,6 +4,22 @@ No external-host startup or data transfer. The bundled frontend and database API
 are served solely to a local pywebview window on 127.0.0.1.
 """
 from __future__ import annotations
+try:
+    import ssl
+    _orig_ssl_context_new = ssl.SSLContext.__new__
+    def _safe_ssl_context_new(cls, *args, **kwargs):
+        try:
+            return _orig_ssl_context_new(cls, *args, **kwargs)
+        except FileNotFoundError:
+            protocol = kwargs.get('protocol')
+            if not protocol and args:
+                protocol = args[0]
+            if protocol is None:
+                protocol = ssl.PROTOCOL_TLS
+            return ssl._SSLContext.__new__(cls, protocol)
+    ssl.SSLContext.__new__ = _safe_ssl_context_new
+except Exception:
+    pass
 import argparse
 import importlib
 import os
@@ -13,6 +29,7 @@ import socket
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 from desktop_runtime import DesktopRuntime, register_desktop_routes, user_data_dir
 
@@ -44,6 +61,15 @@ def import_existing_db(source: Path, destination: Path):
 
 
 def run_worker(process):
+    sid=os.environ.get('SERVEONE_SCHEDULE_ID')
+    if sid:
+        from desktop_runtime import SettingsStore
+        from schedule_policy import within_working_hours
+        settings=SettingsStore(user_data_dir()/'settings.json').public()
+        schedule=next((s for s in settings['schedules'] if s['id']==sid),None)
+        if not settings['automation_enabled'] or not schedule or not schedule['enabled'] or not within_working_hours(settings['working_hours']):
+            print('ACTIVITY Skipped | Outside working hours or schedule disabled',flush=True)
+            raise SystemExit(75)
     # Use bundled Python source, not the old Tkinter GUI application.
     import runpy
     folder=source_dir()/'automation'
@@ -64,7 +90,13 @@ def start_app(port, key):
     from waitress import serve
     from desktop_network_guard import install_local_only_guard
     data=user_data_dir()
+    data.mkdir(parents=True,exist_ok=True)
     os.environ['SERVEONE_DATA_DIR']=str(data)
+    temp = data.parent / 'temp'
+    temp.mkdir(parents=True, exist_ok=True)
+    os.environ['TEMP'] = os.environ['TMP'] = str(temp)
+    import tempfile
+    tempfile.tempdir = str(temp)
     os.environ['SERVEONE_DESKTOP_MODE']='1'
     os.environ.pop('DATABASE_URL',None)
     os.environ['DASHBOARD_ALLOWED_ORIGINS']=''
@@ -85,6 +117,23 @@ def start_app(port, key):
                             name='serveone-local-server',daemon=True)
     server.start()
     return runtime
+
+
+def ensure_single_instance():
+    """Ensure only one GUI instance of ServeoneDashboard runs at a time.
+    If another instance is already running, activate its window and exit.
+    """
+    if os.name != 'nt':
+        return None
+    import ctypes
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\ServeoneDashboard_GUI_SingleInstance")
+    if mutex and ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        hwnd = ctypes.windll.user32.FindWindowW(None, "Serveone Dashboard")
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        sys.exit(0)
+    return mutex
 
 
 def configure_windows_unicode_streams():
@@ -108,6 +157,7 @@ def configure_windows_unicode_streams():
 def main():
     configure_windows_unicode_streams()
     parser=argparse.ArgumentParser()
+    parser.add_argument('--self-check',action='store_true')
     parser.add_argument('--worker',choices=['smro','serp','pur','all'])
     parser.add_argument('--import-db',type=Path)
     parser.add_argument('--scheduled-job',type=str)
@@ -116,12 +166,19 @@ def main():
     # Windows UI prerequisites are checked before importing Flask backend,
     # creating windows, opening the database, or contacting the network.
     # Worker / database import paths are headless and need no WebView2.
-    if not (args.worker or args.import_db or args.scheduled_job or args.browser):
+    if not (args.worker or args.import_db or args.scheduled_job or args.browser or args.self_check):
+        ensure_single_instance()
         from windows_prerequisites import ensure_gui_requirements
         if not ensure_gui_requirements():
             raise SystemExit(3)
     data=user_data_dir()
+    data.mkdir(parents=True,exist_ok=True)
     os.environ['SERVEONE_DATA_DIR']=str(data)
+    temp = data.parent / 'temp'
+    temp.mkdir(parents=True, exist_ok=True)
+    os.environ['TEMP'] = os.environ['TMP'] = str(temp)
+    import tempfile
+    tempfile.tempdir = str(temp)
     # Set explicitly by the Windows desktop launcher, never in shared source defaults.
     os.environ['SERVEONE_DESKTOP_MODE']='1'
     os.environ.pop('DATABASE_URL',None)  # prevent implicit remote/PostgreSQL connections
@@ -131,6 +188,14 @@ def main():
     os.environ['PO_MONITOR_DISABLE_WARMUP']='1'
     os.environ['PO_MONITOR_DISABLE_SCHEDULER']='1'
     os.environ['DASHBOARD_POST_UPLOAD_WARMUP']='0'
+    if args.self_check:
+        import json
+        sys.path.insert(0,str(source_dir()/'automation'))
+        modules=['main','automation_serp','automation_pur_info_reg','lifecycle','schedule_policy','serveone_storage','win32com.client','webview']
+        for module in modules:importlib.import_module(module)
+        output={'status':'ok','modules':modules,'data_dir':str(data)}
+        (data/'self-check.json').write_text(json.dumps(output),encoding='utf-8')
+        return
     if args.worker:
         from worker_lock import run_exclusive
         run_exclusive(
@@ -150,8 +215,12 @@ def main():
         schedule=next((x for x in runtime.store.public()['schedules'] if x['id']==args.scheduled_job),None)
         if not schedule or not runtime.store.public()['automation_enabled'] or not schedule['enabled']:
             raise RuntimeError('Scheduled process missing or disabled')
+        from schedule_policy import within_working_hours
+        if not within_working_hours(runtime.store.public()['working_hours']):
+            runtime.log('ACTIVITY Skipped | Outside working hours')
+            runtime.stop.set()
+            return
         # Run with a temporary local Flask server even when the GUI is closed.
-        import time
         import urllib.request
         for _ in range(100):
             try:
@@ -163,6 +232,13 @@ def main():
         runtime.stop.set()
         if runtime.status_payload()['status']=='error':raise RuntimeError(runtime.status_payload()['last_error'])
         return
+    # Wait for local waitress server to be ready before opening WebView
+    for _ in range(100):
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=0.1):
+                break
+        except OSError:
+            time.sleep(0.05)
     url=f'http://127.0.0.1:{port}/desktop/bootstrap/{secret}'
     if args.browser:
         import webbrowser
@@ -171,6 +247,7 @@ def main():
         threading.Event().wait()
     else:
         import webview
+        webview.settings['ALLOW_DOWNLOADS'] = True
         # Prefer near-full screen on laptops; CSS zoom starts at the best fit.
         import ctypes
         screen_width=ctypes.windll.user32.GetSystemMetrics(0) if os.name=='nt' else 1440
@@ -179,7 +256,9 @@ def main():
         height=max(590,min(1000,screen_height-80))
         webview.create_window('Serveone Dashboard',url,width=width,height=height,min_size=(800,560),
                               background_color='#F8FAFC',confirm_close=True)
-        webview.start(debug=False,private_mode=False)
+        storage_path = str(data / 'webview_profile')
+        os.makedirs(storage_path, exist_ok=True)
+        webview.start(debug=False, private_mode=False, storage_path=storage_path)
     runtime.stop.set()
 
 if __name__=='__main__':main()

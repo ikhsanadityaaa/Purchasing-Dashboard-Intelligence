@@ -12,8 +12,6 @@ notifikasi "berhasil"/"gagal" terlihat identik untuk SMRO, SERP, maupun
 Pur Info Reg.
 """
 import logging
-import tkinter as tk
-from tkinter import messagebox
 
 
 def show_popup(title: str, message: str, success: bool = True,
@@ -33,6 +31,8 @@ def show_popup(title: str, message: str, success: bool = True,
         logging.info(f"[Popup] {title}: {message}")
         return
     try:
+        import tkinter as tk
+        from tkinter import messagebox
         root = tk.Tk()
         root.withdraw()
         root.attributes('-topmost', True)

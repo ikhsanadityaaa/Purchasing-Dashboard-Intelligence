@@ -11,6 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AutoUpdate0115Tests(unittest.TestCase):
+    def test_serp_preserves_sap_gui_default_dir_and_uses_xls(self):
+        source = (ROOT / 'automation' / 'automation_serp.py').read_text('utf8')
+        self.assertIn('filename      = f"{CONFIG[\'FILENAME_PREFIX\']}_{today.strftime(\'%Y%m%d_%H%M%S\')}.xls"', source)
+        self.assertIn("DY_PATH", source)
+        self.assertIn("DOWNLOAD_DIR", source)
+        self.assertIn("status_type == 'E'", source)
+
     def test_serp_large_export_waits_ten_minutes_and_reports_progress(self):
         source=(ROOT/'automation'/'automation_serp.py').read_text('utf8')
         self.assertIn("SERP_FILE_WAIT_SECONDS', '600'",source)

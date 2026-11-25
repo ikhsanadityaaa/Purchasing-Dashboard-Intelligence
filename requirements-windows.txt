@@ -27,3 +27,8 @@ PyGetWindow>=0.0.9,<1
 pyperclip>=1.8,<2
 pywinauto>=0.6.8,<1
 pywin32>=306; sys_platform == "win32"
+
+# Windows timezone database and dashboard imports.
+tzdata
+holidays>=0.50
+google-api-python-client>=2.0

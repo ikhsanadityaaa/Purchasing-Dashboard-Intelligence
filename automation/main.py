@@ -1,6 +1,23 @@
 import os
 import sys
 
+try:
+    import ssl
+    _orig_ssl_context_new = ssl.SSLContext.__new__
+    def _safe_ssl_context_new(cls, *args, **kwargs):
+        try:
+            return _orig_ssl_context_new(cls, *args, **kwargs)
+        except FileNotFoundError:
+            protocol = kwargs.get('protocol')
+            if not protocol and args:
+                protocol = args[0]
+            if protocol is None:
+                protocol = ssl.PROTOCOL_TLS
+            return ssl._SSLContext.__new__(cls, protocol)
+    ssl.SSLContext.__new__ = _safe_ssl_context_new
+except Exception:
+    pass
+
 # FIX V11: path resolution saat frozen (.exe)
 from _paths import _app_dir, _data_dir, _env_file_path, _safe_log_path, _safe_mkdir, _safe_download_dir, _safe_fail_dir, _is_frozen
 import time
@@ -10,8 +27,6 @@ import shutil
 import subprocess
 import requests
 import net_tls
-import tkinter as tk
-from tkinter import messagebox
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -155,56 +170,11 @@ CONFIG = {
 
 # Cleanup tidak boleh berjalan saat module di-import oleh GUI atau test.
 def cleanup_old_failed_uploads():
-    try:
-        cutoff = time.time() - CONFIG['MAX_FAILED_AGE_DAYS'] * 86400
-        for file_path in CONFIG['UPLOAD_FAIL_DIR'].iterdir():
-            try:
-                if file_path.is_file() and file_path.stat().st_mtime < cutoff:
-                    file_path.unlink()
-                    logging.info(f'Cleanup file failed lama: {file_path.name}')
-            except Exception:
-                pass
-    except Exception as e:
-        logging.warning(f'Gagal cleanup UPLOAD_FAIL_DIR: {e}')
+    return  # Failed imports require recovery, not age-based deletion.
 
 
-# FIX V34: backup_failed/ (AUTO_SAVE_LOCAL_DIR) sebelumnya tidak pernah
-# dibersihkan — file backup dari upload yang gagal bertahun-tahun lama bisa
-# memenuhi disk (keluhan user: "disk saya sering penuh"). Sekarang dibersihkan
-# dengan batas umur yang sama seperti failed_uploads/.
 def cleanup_old_backup_files():
-    try:
-        backup_dir = Path(CONFIG['AUTO_SAVE_LOCAL_DIR'])
-        cutoff = time.time() - CONFIG['MAX_BACKUP_AGE_DAYS'] * 86400
-        if not backup_dir.exists():
-            return
-        for file_path in backup_dir.iterdir():
-            try:
-                if file_path.is_file() and file_path.stat().st_mtime < cutoff:
-                    file_path.unlink()
-                    logging.info(f'Cleanup file backup lama: {file_path.name}')
-            except Exception:
-                pass
-    except Exception as e:
-        logging.warning(f'Gagal cleanup AUTO_SAVE_LOCAL_DIR: {e}')
-
-
-# ── FIX V33: pemulihan file yang belum terupload ke endpoint ─────────────────
-# Keluhan: "proses search client odr terhenti ketika excel berhasil di download
-# dan dianggap sukses upload padahal belum di upload ke endpoint". Tiga celah
-# ditutup helper-helper ini:
-#   1. File Excel yang tertinggal di folder worker (run sebelumnya mati/ter-kill
-#      saat upload async masih berjalan) tadinya DIHAPUS oleh
-#      cleanup_worker_dirs() — sekarang dipindah ke UPLOAD_FAIL_DIR lalu
-#      diupload ulang di awal run.
-#   2. File di failed_uploads/ tadinya TIDAK PERNAH di-reupload di run
-#      berikutnya (komentar lama menyesatkan) dan dihapus otomatis setelah 7
-#      hari — sekarang di-requeue di awal setiap run.
-#   3. Pemulihan hanya dilakukan di titik yang BEBAS race: awal run (belum ada
-#      thread upload) dan setelah wait_all() selesai — tidak di tengah run
-#      supaya tidak memindahkan file yang sedang dibaca thread upload.
-
-_EXCEL_EXTS = {'.xlsx', '.xls', '.csv'}
+    return  # Failed imports require recovery, not age-based deletion.
 
 
 def _in_fail_dir(file_path: Path) -> bool:
@@ -513,6 +483,11 @@ def _local_chromedriver_candidates():
     seen = set()
     try:
         bases = [_app_dir(), Path.cwd()]
+        if hasattr(sys, '_MEIPASS'):
+            bases.append(Path(sys._MEIPASS))
+        _v = Path(__file__).resolve().parents[1] / 'vendor'
+        if _v.is_dir():
+            bases.append(_v)
     except Exception:
         bases = [Path.cwd()]
     exe_name = 'chromedriver.exe' if os.name == 'nt' else 'chromedriver'
@@ -1566,8 +1541,7 @@ def wait_for_new_download(download_dir: Path, before_files, timeout: int = 120,
 def cleanup_downloaded_excel_files(include_completed: bool = True):
     """Hapus file download sementara. File Excel final bisa dipertahankan untuk audit."""
     exts = {".crdownload", ".tmp", ".htm", ".html"}
-    if include_completed:
-        exts.update({".xlsx", ".xls", ".csv"})
+    # Completed Excel is deleted only by a confirmed import call site.
     deleted = 0
     for fp in CONFIG["DOWNLOAD_DIR"].iterdir():
         if fp.is_file() and fp.suffix.lower() in exts:
@@ -1849,7 +1823,7 @@ def save_debug_artifacts(driver, label: str):
         logging.warning(f"Gagal menyimpan HTML debug: {err_short}")
 
 
-def safe_driver_quit(driver, tag: str = ""):
+def _original_safe_driver_quit(driver, tag: str = ""):
     """Quit driver TANPA memicu urllib3 retry spam jika session sudah dead.
 
     FIX V15: driver.quit() pada session yang sudah mati juga memicu urllib3
@@ -1918,6 +1892,15 @@ _SETUP_DRIVER_LOCK = threading.Lock()
 # session hidup yang boleh dibunuh.
 _LIVE_DRIVER_PIDS = set()
 _LIVE_DRIVER_PIDS_LOCK = threading.Lock()
+
+
+def safe_driver_quit(driver, tag=""):
+    try:
+        _original_safe_driver_quit(driver, tag=tag)
+    finally:
+        if driver is not None:
+            from lifecycle import cleanup_profile
+            cleanup_profile(driver, "_serveone_profile_dir")
 
 
 def _register_driver_pid(driver):
@@ -2149,20 +2132,26 @@ def setup_driver(download_dir=None, driver_path=None, profile_tag=None):
             '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
             '--disable-popup-blocking', '--disable-background-networking',
             '--disable-component-update', '--disable-sync', '--disable-notifications',
-            '--disable-features=PushMessaging,NotificationTriggers,InsecureDownloadWarnings,TranslateUI,ChromeWhatsNewUI',
-            '--unsafely-treat-insecure-origin-as-secure=http://svobpp.serveone.co.kr',
+            '--disable-features=HttpsUpgrades,HttpsFirstBalancedMode,HttpsFirstModeV2,PushMessaging,NotificationTriggers,InsecureDownloadWarnings,TranslateUI,ChromeWhatsNewUI',
+            '--unsafely-treat-insecure-origin-as-secure=http://sportal.serveone.id,http://sso.serveone.co.kr:6061,http://svobpp.serveone.co.kr,http://svoerpsso.serveoneep.co.kr:52100',
+            '--allow-running-insecure-content',
+            '--ignore-certificate-errors',
+            '--ignore-ssl-errors=yes',
             '--window-size=1920,1080', '--disable-blink-features=AutomationControlled',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             # FIX V13: anti-crash flags untuk parallel start. Tanpa ini, Chrome
             # versi baru sering crash saat start barengan dari folder yang sama
             # atau saat ada instance Chrome lain yang masih hidup di latar.
             '--no-first-run', '--no-default-browser-check',
+            '--disable-search-engine-choice-screen', '--hide-crash-restore-bubble',
             '--disable-extensions', '--disable-plugins', '--disable-default-apps',
             '--disable-component-extensions-with-background-pages',
             '--disable-hang-monitor', '--disable-prompt-on-repost',
             '--disable-backgrounding-occluded-windows',
             '--disable-renderer-backgrounding',
             '--disable-ipc-flood-protection',
+            '--disable-features=OptimizationGuideModelDownloading,OptimizationHintsFetching,OptimizationTargetPrediction',
+            '--disable-component-update',
             # FIX V13: user-data-dir unik per call + remote-debugging-port 0
             # (port auto-pick). INI PENYEBAB UTAMA 'session not created':
             # parallel Chrome start pakai user-data-dir default Chrome yang
@@ -2181,6 +2170,7 @@ def setup_driver(download_dir=None, driver_path=None, profile_tag=None):
             opts.add_experimental_option('detach', True)
         opts.add_experimental_option('prefs', {
             'download.default_directory': str(download_dir),
+            'https_first_mode': False,
             'download.prompt_for_download': False,
             'download.directory_upgrade': True,
             'safebrowsing.enabled': False,  # False agar tidak block download dari HTTP
@@ -2207,6 +2197,8 @@ def setup_driver(download_dir=None, driver_path=None, profile_tag=None):
         except Exception:
             pass
         _register_driver_pid(driver)
+        from lifecycle import install_portal_navigation
+        install_portal_navigation(driver)
         driver.execute_cdp_cmd('Browser.setDownloadBehavior', {
             'behavior': 'allow', 'downloadPath': str(download_dir)
         })
@@ -2228,16 +2220,18 @@ def setup_driver(download_dir=None, driver_path=None, profile_tag=None):
 
 # ───────────────────────────── VPN CHECK ──────────────────────────────────────
 
-def check_vpn_connection():
+def check_vpn_connection(quiet: bool = False):
     try:
         resp = requests.get(CONFIG['LOGIN_START_URL'], timeout=10, allow_redirects=True)
         if resp.status_code == 200:
             logging.info("✓ VPN terhubung ke server ServeOne")
             return True
-        logging.warning(f"⚠ Server respond dengan status: {resp.status_code}")
+        if not quiet:
+            logging.warning(f"⚠ Server respond dengan status: {resp.status_code}")
         return False
     except requests.exceptions.RequestException as e:
-        logging.error(f"✗ VPN tidak terhubung: {e}")
+        if not quiet:
+            logging.warning(f"VPN belum terhubung: {e}")
         return False
 
 
@@ -2339,7 +2333,7 @@ def login_to_portal(driver):
             username_field = switch_to_context_with_element(driver, username_locators, timeout=30)
         except TimeoutException:
             driver.switch_to.default_content()
-            if 'sportal.serveone.id' in driver.current_url or 'PortalView.do' in driver.current_url:
+            if ('sportal.serveone.id' in driver.current_url or 'PortalView.do' in driver.current_url) and len(driver.find_elements(By.NAME, 'portal_header')) > 0:
                 logging.info("Sudah berada di portal, login dilewati.")
                 return True
             raise
@@ -2955,7 +2949,8 @@ def upload_to_dashboard(file_path: Path, max_retries: int = None):
                     timeout=CONFIG.get('UPLOAD_HTTP_TIMEOUT_S', 600),
                 )
             elapsed = time.time() - t0
-            if 200 <= resp.status_code < 300:
+            from lifecycle import import_committed
+            if import_committed(resp):
                 try:
                     result = resp.json()
                     # FIX V35b: dashboard SMRO inline (sync) mengembalikan kunci
@@ -3065,39 +3060,35 @@ def save_local_copy(file_path: Path, local_dir: str) -> bool:
 
 # ──────────────────────── SEARCH & DOWNLOAD ───────────────────────────────────
 
-def _wait_vpn_reconnect(interval: int = 30, max_wait: float = None) -> bool:
-    """Tunggu sampai VPN tersambung kembali. Log setiap interval detik.
+def _wait_vpn_reconnect(interval: int = 15, max_wait: float = None) -> bool:
+    """Tunggu sampai VPN tersambung (cek tiap interval detik).
 
-    FIX V23: sebelumnya loop INFINITE — kalau VPN tidak pernah kembali,
-    worker SMRO/PUR menggantung selamanya menunggu, log tetap bertambah
-    tiap 30 detik (watchdog GUI tidak menyadarinya) dan Run All sequential
-    MACET di step itu sampai hard timeout 1 jam — inilah akar laporan
-    "process all prod id selesai tapi tidak lanjut proses berikutnya".
-    Sekarang dibatasi max_wait (default env SMRO_VPN_MAX_WAIT_SECONDS,
-    900 detik / 15 menit): return True kalau VPN kembali, False kalau
-    menyerah — pemanggil lalu membatalkan run ini dengan terhormat supaya
-    proses/jadwal berikutnya tetap jalan (jadwal interval akan retry
-    otomatis saat VPN sudah normal).
+    Default max_wait = 0 (tunggu sampai VPN terhubung atau user klik Stop All).
+    Bisa dibatasi lewat env SMRO_VPN_MAX_WAIT_SECONDS (>0) jika diperlukan.
     """
     if max_wait is None:
         try:
-            max_wait = float(os.getenv('SMRO_VPN_MAX_WAIT_SECONDS', '900'))
+            max_wait = float(os.getenv('SMRO_VPN_MAX_WAIT_SECONDS', '0'))
         except Exception:
-            max_wait = 900.0
-    logging.warning("  Menunggu VPN / koneksi kembali...")
-    deadline = time.time() + max_wait
+            max_wait = 0.0
+    logging.info("ACTIVITY Waiting for VPN")
+    logging.info(f"  Menunggu VPN terhubung... (cek tiap {interval}s)")
+    deadline = (time.time() + max_wait) if max_wait and max_wait > 0 else None
+    last_log = time.time()
     while True:
         time.sleep(interval)
-        if check_vpn_connection():
-            logging.info("  VPN tersambung kembali.")
+        if check_vpn_connection(quiet=True):
+            logging.info("  VPN terhubung — melanjutkan proses.")
             return True
-        if time.time() >= deadline:
+        if deadline is not None and time.time() >= deadline:
             logging.error(
                 f"  VPN BELUM kembali setelah {int(max_wait)}s. Berhenti menunggu — "
                 f"run ini dibatalkan supaya proses/jadwal berikutnya tetap jalan."
             )
             return False
-        logging.info("  Masih menunggu VPN... (cek lagi dalam %ds)" % interval)
+        if time.time() - last_log >= 60:
+            logging.info(f"  Masih menunggu VPN... (cek lagi dalam {interval}s)")
+            last_log = time.time()
 
 
 def _reopen_browser_and_resume(op_unit_values):
@@ -3462,9 +3453,10 @@ def search_and_download_smro(driver, op_unit_values=None, _pending_ranges=None, 
                 _pending_ranges.pop(0)
                 break
 
-            # Upload sukses (atau memang dilewati setting) — file kerja aman dihapus
+            # Disabled imports must retain the downloaded source file.
             try:
-                target_path.unlink()
+                if CONFIG["UPDATE_DASHBOARD"]:
+                    target_path.unlink()
                 logging.info(f"  File kerja dihapus: {target_path.name}")
             except Exception as e:
                 logging.warning(f"  Gagal hapus file kerja {target_path.name}: {e}")
@@ -3978,9 +3970,7 @@ def worker_process_range(driver, date_from, date_to, range_level,
                 "diupload ulang otomatis di run berikutnya.")
             return False, result_count, target_name
         logging.info(f"  {tag} Upload dashboard dilewati sesuai setting")
-        # Upload disabled — hapus file kerja
-        try: target_path.unlink()
-        except Exception: pass
+        # Upload disabled: retain source until a committed import succeeds.
         logging.info(f"  {tag} ✓ Batch download selesai: {target_name} ({result_count} rows)")
         return True, result_count, target_name
 
@@ -4366,11 +4356,12 @@ def run_parallel_automation():
 
     try:
         # ── Step 1: VPN ──
-        if not check_vpn_connection():
-            msg = "VPN tidak terhubung!\n\nSilakan connect ke AxGate VPN terlebih dahulu."
-            logging.error(msg)
-            show_popup("VPN Required", msg, success=False)
-            return False
+        if not check_vpn_connection(quiet=True):
+            if not _wait_vpn_reconnect(interval=15):
+                msg = "VPN tidak terhubung!\n\nSilakan connect ke AxGate VPN terlebih dahulu."
+                logging.error(msg)
+                show_popup("VPN Required", msg, success=False)
+                return False
 
         # FIX V33: requeue file gagal upload SETELAH VPN dipastikan connect —
         # kalau di-requeue saat VPN mati, thread upload akan habiskan seluruh
@@ -4582,21 +4573,19 @@ def run_parallel_automation():
 
 
 def cleanup_worker_dirs():
-    """Bersihkan folder download worker.
-
-    FIX V33: folder worker di-sweep dulu oleh collect_orphan_uploads() — file
-    Excel yang masih ada di sini berarti BELUM TERUPLOAD (run mati di tengah
-    jalan) dan TIDAK BOLEH dihapus; dipindah ke failed_uploads/ untuk diupload
-    ulang di run berikutnya. Yang dihapus hanya file sementara
-    (.crdownload/.tmp/.htm/.html)."""
+    """Bersihkan folder download worker dan profile chrome yatim."""
     collect_orphan_uploads()
-    exts = {".crdownload", ".tmp", ".htm", ".html"}
+    try:
+        from lifecycle import cleanup_all_orphan_profiles
+        cleanup_all_orphan_profiles()
+    except Exception:
+        pass
     for fp in CONFIG["DOWNLOAD_DIR"].iterdir():
         if fp.is_dir() and fp.name.startswith("worker_"):
             try:
                 for f in fp.iterdir():
                     try:
-                        if f.is_file() and f.suffix.lower() in exts:
+                        if f.is_file():
                             f.unlink()
                     except Exception:
                         pass
@@ -4633,11 +4622,12 @@ def run_automation():
 
     try:
         # ── VPN ──
-        if not check_vpn_connection():
-            msg = "VPN tidak terhubung!\n\nSilakan connect ke AxGate VPN terlebih dahulu."
-            logging.error(msg)
-            show_popup("VPN Required", msg, success=False)
-            return False
+        if not check_vpn_connection(quiet=True):
+            if not _wait_vpn_reconnect(interval=15):
+                msg = "VPN tidak terhubung!\n\nSilakan connect ke AxGate VPN terlebih dahulu."
+                logging.error(msg)
+                show_popup("VPN Required", msg, success=False)
+                return False
 
         # ── Setup browser ──
         logging.info("\n[Setup] Membuka browser...")
@@ -5098,12 +5088,13 @@ def run_all_processes_sequential() -> bool:
     logging.info("=" * 70)
     logging.info("RUN ALL SEQUENTIAL DIMULAI: SERP -> PROD REG STATUS -> SMRO")
     logging.info("=" * 70)
-    if not check_vpn_connection():
-        logging.error("RUN ALL dibatalkan: VPN tidak terhubung atau DNS portal tidak resolve.")
-        logging.info("=" * 70)
-        logging.info("RUN ALL SEQUENTIAL SELESAI DENGAN ERROR")
-        logging.info("=" * 70)
-        return False
+    if not check_vpn_connection(quiet=True):
+        if not _wait_vpn_reconnect(interval=15):
+            logging.error("RUN ALL dibatalkan: VPN tidak terhubung atau DNS portal tidak resolve.")
+            logging.info("=" * 70)
+            logging.info("RUN ALL SEQUENTIAL SELESAI DENGAN ERROR")
+            logging.info("=" * 70)
+            return False
     step_results = []  # FIX: dipakai untuk popup ringkasan di akhir Run All
     for process_name, label in order:
         logging.info(f"Mulai proses: {label}")

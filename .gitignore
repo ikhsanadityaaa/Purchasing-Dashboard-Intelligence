@@ -17,6 +17,8 @@ automation/failed_uploads_*/
 *.sqlite3
 *.log
 vendor/MicrosoftEdgeWebView2RuntimeInstallerX64.exe
+vendor/chromedriver.exe
+vendor/codex-rejected-cas.pem
 
 # Local credentials and machine-specific configuration.
 .env

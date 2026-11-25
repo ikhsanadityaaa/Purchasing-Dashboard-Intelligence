@@ -8,8 +8,16 @@ import time
 def run_exclusive(callback, on_wait=None, poll_seconds=1):
     lockpath=user_data_dir()/'automation-worker.lock'
     lockpath.parent.mkdir(parents=True,exist_ok=True)
-    with lockpath.open('a+b') as lock:
-        lock.seek(0);lock.write(b'X');lock.flush();lock.seek(0)
+    if not lockpath.exists() or lockpath.stat().st_size == 0:
+        try:
+            with lockpath.open('a+b') as init_lock:
+                if init_lock.tell() == 0:
+                    init_lock.write(b'X')
+                    init_lock.flush()
+        except OSError:
+            pass
+    with lockpath.open('r+b') as lock:
+        lock.seek(0)
         if os.name=='nt':
             import msvcrt
             waiting=False
@@ -23,7 +31,9 @@ def run_exclusive(callback, on_wait=None, poll_seconds=1):
                     waiting=True
                     time.sleep(poll_seconds)
             try:return callback()
-            finally:lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
+            finally:
+                try:lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
+                except OSError:pass
         else:
             import fcntl
             waiting=False

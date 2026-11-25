@@ -1,9 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('C:/Users/LENOVO/AppData/Local/Temp/ServeoneDashboard-build-28822-3310', 'dashboard'), ('C:/Users/LENOVO/AppData/Local/Temp/ServeoneAutomation-build-19807-12556', 'automation')]
+datas = [('D:/ServeoneDashboardRebuild/stage-d52c2dee22c64fb784835c5a56af14f9/dashboard', 'dashboard'), ('D:/ServeoneDashboardRebuild/stage-d52c2dee22c64fb784835c5a56af14f9/automation', 'automation')]
 binaries = []
-hiddenimports = ['app', 'psutil', 'pyautogui', 'pygetwindow', 'pyperclip', 'pywinauto', 'win32com.client', 'pythoncom', 'pywintypes', 'google.oauth2.credentials', 'google_auth_oauthlib.flow', 'google.auth.transport.requests', 'xlrd', 'main', 'automation_serp', 'automation_pur_info_reg', 'i18n', 'net_tls', '_paths', 'run_presence', 'tkinter']
+hiddenimports = ['app', 'psutil', 'pyautogui', 'pygetwindow', 'pyperclip', 'pywinauto', 'win32com.client', 'pythoncom', 'pywintypes', 'google.oauth2.credentials', 'google_auth_oauthlib.flow', 'google.auth.transport.requests', 'xlrd', 'main', 'automation_serp', 'automation_pur_info_reg', 'i18n', 'net_tls', '_paths', 'run_presence', 'tkinter', 'serveone_storage', 'schedule_policy', 'lifecycle']
+datas += collect_data_files('tzdata')
 tmp_ret = collect_all('webview')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('selenium')
@@ -14,7 +16,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 a = Analysis(
     ['desktop_launcher.py'],
-    pathex=['dashboard', 'C:/Users/LENOVO/AppData/Local/Temp/ServeoneAutomation-build-19807-12556'],
+    pathex=['dashboard', 'D:/ServeoneDashboardRebuild/stage-d52c2dee22c64fb784835c5a56af14f9/automation'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

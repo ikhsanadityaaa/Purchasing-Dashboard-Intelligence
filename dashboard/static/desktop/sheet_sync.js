@@ -155,11 +155,8 @@ function mountImportActions(){
  const menu=[...trigger.parentElement.children].find(node=>node!==trigger&&node.tagName==='DIV');fillGoogleMenu(menu);
 }
 function mountVendorActions(){
- const heading=pageHeading('Vendor'),row=heading?.parentElement?.parentElement,actions=row?.lastElementChild;if(!actions||actions.querySelector('[data-google-vendor-more]'))return;
- const wrap=document.createElement('div');wrap.className='zd-google-more-wrap';wrap.dataset.googleVendorMore='1';
- const trigger=document.createElement('button');trigger.type='button';trigger.className='zd-google-more-trigger';trigger.textContent='More';trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-expanded','false');
- const menu=document.createElement('div');menu.className='zd-google-owned-menu';menu.hidden=true;menu.setAttribute('role','menu');fillGoogleMenu(menu);
- trigger.addEventListener('click',event=>{event.stopPropagation();menu.hidden=!menu.hidden;trigger.setAttribute('aria-expanded',String(!menu.hidden));});wrap.append(trigger,menu);actions.appendChild(wrap);
+ // Vendor page is now local SQLite + Excel (no Google Sheets dependency).
+ return;
 }
 function mountGoogleActions(){if(current==='import')mountImportActions();if(current==='vendor')mountVendorActions();}
 document.addEventListener('click',event=>{if(!event.target.closest?.('.zd-google-more-wrap'))closeGoogleMenu();});
@@ -259,6 +256,20 @@ for(const name of ['pushState','replaceState']){
 window.addEventListener('popstate',navigate);
 window.addEventListener('pageshow',navigate);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll(true);});
+const originalWindowOpen=window.open;
+window.open=function(url,target,features){
+ try{
+  const u=new URL(String(url||''),location.origin);
+  if(u.origin===location.origin&&u.pathname.startsWith('/api/vendor-control/login/')){
+   const rowKey=u.pathname.slice('/api/vendor-control/login/'.length);
+   if(rowKey){
+    api('/api/desktop/vendor-login/'+rowKey,{method:'POST'}).catch(()=>originalWindowOpen.call(window,url,target,features));
+    return null;
+   }
+  }
+ }catch(_){}
+ return originalWindowOpen.apply(this,arguments);
+};
 function init(){mount();navigate();setInterval(()=>{navigate();mountGoogleActions();if(!document.hidden)poll();},2000);}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();

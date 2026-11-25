@@ -18,9 +18,12 @@ _original_getaddrinfo=socket.getaddrinfo
 _installed=False
 _scope=threading.local()
 _APPROVED={'docs.google.com','sheets.googleapis.com','oauth2.googleapis.com','www.googleapis.com','drive.usercontent.google.com'}
+_VENDOR_LOOKUP_APPROVED={'html.duckduckgo.com','duckduckgo.com','lite.duckduckgo.com'}
 
 def _allowed_hostname(host):
     h=str(host).lower().rstrip('.')
+    if getattr(_scope,'mode',None)=='vendor_lookup':
+        return h in _VENDOR_LOOKUP_APPROVED
     return h in _APPROVED or h.endswith('.googleusercontent.com')
 
 def _proxy_hostnames():
@@ -39,9 +42,24 @@ def google_sync_is_allowed():
 @contextmanager
 def permit_google_sheets_network():
     previous=getattr(_scope,'ips',None)
+    prev_mode=getattr(_scope,'mode',None)
     _scope.ips=set()
+    _scope.mode='google_sheets'
     try:yield
-    finally:_scope.ips=previous
+    finally:
+        _scope.ips=previous
+        _scope.mode=prev_mode
+
+@contextmanager
+def permit_vendor_lookup_network():
+    previous=getattr(_scope,'ips',None)
+    prev_mode=getattr(_scope,'mode',None)
+    _scope.ips=set()
+    _scope.mode='vendor_lookup'
+    try:yield
+    finally:
+        _scope.ips=previous
+        _scope.mode=prev_mode
 
 def _loopback(host):
     try:return ipaddress.ip_address(host).is_loopback

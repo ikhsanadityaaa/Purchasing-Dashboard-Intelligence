@@ -103,6 +103,53 @@ except ImportError:
 #       kalender + purge cache upload V63.6, janitor disk V63.5, fitur V63.2-V63.4)
 app = Flask(__name__, static_folder='static')
 
+class _BeforeRequestList(list):
+    def insert(self, index, func):
+        if getattr(func, '__name__', '') == 'desktop_session_guard':
+            orig = func
+            import functools
+            @functools.wraps(orig)
+            def _wrapped_guard(*args, **kwargs):
+                if request.path.startswith('/api/vendor-control/login/') or request.path.startswith('/api/desktop/save-download'):
+                    return None
+                return orig(*args, **kwargs)
+            func = _wrapped_guard
+        super().insert(index, func)
+
+app.before_request_funcs[None] = _BeforeRequestList()
+
+@app.route('/api/desktop/save-download', methods=['POST'])
+def desktop_save_download():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        file = request.files['file']
+        filename = (request.form.get('filename') or file.filename or 'export.xlsx').strip()
+        import os
+        from pathlib import Path
+        safe_name = os.path.basename(filename)
+        if not safe_name: safe_name = 'export.xlsx'
+        downloads_dir = None
+        if os.name == 'nt':
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders') as key:
+                    downloads_dir = Path(winreg.QueryValueEx(key, '{374DE290-123F-4565-9164-39C4925E467B}')[0])
+            except Exception: pass
+        if not downloads_dir or not downloads_dir.is_dir():
+            downloads_dir = Path.home() / 'Downloads'
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        target = downloads_dir / safe_name
+        if target.exists():
+            stem = target.stem; suffix = target.suffix; counter = 1
+            while target.exists():
+                target = downloads_dir / f'{stem} ({counter}){suffix}'
+                counter += 1
+        file.save(str(target))
+        return jsonify({'ok': True, 'filename': target.name, 'path': str(target), 'downloads_dir': str(downloads_dir)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 # ── V62.6 PERF: gzip + cache headers ────────────────────────────────────────
 # Transfer 1MB+ bundle mentah sangat lambat di koneksi lambat; gzip mengecilkan
@@ -144,7 +191,7 @@ def _v66_gzip_and_cache(response):
                 if p.startswith('/assets/'):
                     # V63.2: cache hasil kompresi asset statis (bundle 1MB) —
                     # kompresi ulang tiap request memakan CPU di host lambat.
-                    ck = (p, len(data), _V67_BOOT_TS)
+                    ck = (p, len(data), request.query_string, _V67_BOOT_TS)
                     compressed = _V67_GZ_CACHE.get(ck)
                     if compressed is None:
                         compressed = _gz.compress(data, 6)
@@ -176,6 +223,7 @@ def _v6320_upload_inline_watch(response):
             if 200 <= response.status_code < 300 and response.status_code != 202:
                 _soft_invalidate_response_caches()
                 _publish_data_revision()
+                response.headers['X-Import-Committed'] = '1'
         if _upload_proc_active() and response.status_code == 200:
             response.headers['X-Upload-Active'] = '1'
     except Exception:
@@ -314,7 +362,7 @@ _DASHBOARD_SNAPSHOT_DIR = os.path.join(
     os.environ.get('SERVEONE_DATA_DIR', os.path.dirname(os.path.abspath(__file__))),
     'instance', 'dashboard_snapshots')
 _DASHBOARD_SNAPSHOT_LOCK = threading.Lock()
-_DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+_DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS = 60
 _DASHBOARD_SNAPSHOT_FRESH_SECONDS = 10 * 60
 
 def _dashboard_snapshot_namespace(key):
@@ -334,7 +382,21 @@ def _dashboard_snapshot_load(key):
             return None
         with _DASHBOARD_SNAPSHOT_LOCK, io.open(path, 'r', encoding='utf-8') as fh:
             saved = json.load(fh)
-        return saved.get('payload') if isinstance(saved, dict) else None
+        payload = saved.get('payload') if isinstance(saved, dict) else None
+        if isinstance(payload, dict):
+            # Guard against stale 0-count snapshots when database actually has records
+            cnt = payload.get('total_so_count')
+            if (cnt is None or cnt == 0) and db.session.query(SOData.id).first() is not None:
+                return None
+            if isinstance(key, (tuple, list)) and len(key) > 0 and key[0] in ('all_registered_items', 'registered_items_summary'):
+                tot = payload.get('total')
+                if (tot is None or tot == 0 or not payload.get('data')) and db.session.query(ProductIDDB.id).first() is not None:
+                    return None
+            if isinstance(key, (tuple, list)) and len(key) > 0 and key[0] == 'import_data':
+                tot = payload.get('total')
+                if (tot is None or tot == 0 or not payload.get('data')) and db.session.query(ImportDashboardRow.id).first() is not None:
+                    return None
+        return payload
     except (OSError, ValueError, TypeError):
         return None
 
@@ -500,6 +562,20 @@ def runtime_cache_get_swr(key, refresh_url=None):
         return None
     with _READ_CACHE_LOCK:
         item = _READ_RESPONSE_CACHE.get(key)
+    if item:
+        _test_pl = item[1] if isinstance(item, tuple) and len(item) == 2 else None
+        if isinstance(_test_pl, dict) and isinstance(key, (tuple, list)) and len(key) > 0:
+            _k0 = key[0]
+            tot = _test_pl.get('total')
+            _stale_empty = (
+                (_k0 in ('all_registered_items', 'registered_items_summary') and (tot is None or tot == 0 or not _test_pl.get('data')) and db.session.query(ProductIDDB.id).first() is not None)
+                or (_k0 == 'import_data' and (tot is None or tot == 0 or not _test_pl.get('data')) and db.session.query(ImportDashboardRow.id).first() is not None)
+            )
+            if _stale_empty:
+                item = None
+                with _READ_CACHE_LOCK:
+                    _READ_RESPONSE_CACHE.pop(key, None)
+                    _READ_CACHE_SIZES.pop(key, None)
     if not item:
         payload = _dashboard_snapshot_load(key)
         if payload is None:
@@ -634,17 +710,41 @@ _DATA_REVISION_STATE = {'seen': None, 'checked': 0.0}
 def _publish_data_revision():
     import uuid as _rev_uuid
     with _DATA_REVISION_LOCK:
+        tmp = None
         try:
             os.makedirs(os.path.dirname(_DATA_REVISION_PATH), exist_ok=True)
+            rev_val = _rev_uuid.uuid4().hex + '\n'
             tmp = _DATA_REVISION_PATH + '.' + _rev_uuid.uuid4().hex[:8] + '.tmp'
             with io.open(tmp, 'w', encoding='ascii') as fh:
-                fh.write(_rev_uuid.uuid4().hex + '\n')
-            os.replace(tmp, _DATA_REVISION_PATH)
+                fh.write(rev_val)
+            replaced = False
+            for _attempt in range(3):
+                try:
+                    os.replace(tmp, _DATA_REVISION_PATH)
+                    replaced = True
+                    break
+                except PermissionError:
+                    time.sleep(0.02)
+            if not replaced:
+                with io.open(_DATA_REVISION_PATH, 'w', encoding='ascii') as fh:
+                    fh.write(rev_val)
             with io.open(_DATA_REVISION_PATH, 'r', encoding='ascii') as fh:
                 _DATA_REVISION_STATE['seen'] = fh.read(80)
             _DATA_REVISION_STATE['checked'] = time.monotonic()
         except OSError as exc:
             print(f'[data-revision] warning: cannot publish update ({exc})', flush=True)
+        finally:
+            if tmp and os.path.exists(tmp):
+                try: os.remove(tmp)
+                except OSError: pass
+    try:
+        if os.path.exists(_DASHBOARD_SNAPSHOT_DIR):
+            for _sn in os.listdir(_DASHBOARD_SNAPSHOT_DIR):
+                if _sn.endswith('.json'):
+                    try: os.remove(os.path.join(_DASHBOARD_SNAPSHOT_DIR, _sn))
+                    except Exception: pass
+    except Exception:
+        pass
 
 def _check_data_revision():
     # Max 1 shared-file read/worker/3s, not on every request.
@@ -1550,9 +1650,12 @@ def _run_upload_job(job_id):
         finished = time.time()
         started = job.get('started_at') or finished
         if code < 400 and payload is not None:
-            # Data is committed: invalidate local aggregates and notify other
-            # workers without wiping stale response payloads from memory.
-            _soft_invalidate_response_caches()
+            # Data is committed: in desktop mode hard-clear response caches so
+            # the live UI immediately reads fresh SQLite data instead of stale SWR.
+            if os.environ.get('SERVEONE_DESKTOP_MODE') == '1':
+                clear_runtime_caches(force_hard=True)
+            else:
+                _soft_invalidate_response_caches()
             _publish_data_revision()
             state = {'status': 'done', 'result': payload, 'error': None,
                      'finished_at': finished, 'duration_s': round(finished - started, 2)}
@@ -1638,7 +1741,12 @@ def _soft_invalidate_response_caches():
         for k in list(_READ_RESPONSE_CACHE.keys()):
             item = _READ_RESPONSE_CACHE.get(k)
             if isinstance(item, tuple) and len(item) == 2:
-                _READ_RESPONSE_CACHE[k] = (past, item[1])
+                pl = item[1]
+                if isinstance(pl, dict) and (pl.get('total') == 0 or not pl.get('data') or (isinstance(k, tuple) and k and k[0] in ('all_registered_items', 'registered_items_summary', 'import_data', 'import_data_base_v613'))):
+                    _READ_RESPONSE_CACHE.pop(k, None)
+                    _READ_CACHE_SIZES.pop(k, None)
+                else:
+                    _READ_RESPONSE_CACHE[k] = (past, item[1])
     with _COMPLETED_CACHE_LOCK:
         for k in list(_COMPLETED_SUMMARY_CACHE.keys()):
             entry = _COMPLETED_SUMMARY_CACHE.get(k)
@@ -1671,13 +1779,22 @@ def _soft_invalidate_response_caches():
             _CR_ANALYSIS_CACHE_V632722.clear()
     except NameError:
         pass
+    try:
+        if os.path.exists(_DASHBOARD_SNAPSHOT_DIR):
+            for _sn in os.listdir(_DASHBOARD_SNAPSHOT_DIR):
+                if _sn.endswith('.json'):
+                    try: os.remove(os.path.join(_DASHBOARD_SNAPSHOT_DIR, _sn))
+                    except Exception: pass
+    except Exception:
+        pass
 
-def clear_runtime_caches():
+def clear_runtime_caches(force_hard=False):
     global _RUNTIME_CACHE_VERSION
     # V63.20: saat proses upload AKTIF (worker ATAU inline ?sync=1), invalidasi
-    # selalu LEMBUT — data lama tetap dilayani instan sampai upload selesai;
-    # setelah itu SWR menghitung ulang otomatis (data kembali normal).
-    if getattr(_UPLOAD_JOB_EXECUTING, 'on', False) or _upload_proc_active():
+    # selalu LEMBUT pada web multi-user — data lama tetap dilayani instan sampai
+    # upload selesai. Pada desktop mode (single-user lokal) atau force_hard=True,
+    # selalu bersihkan cache secara penuh agar UI langsung menampilkan data baru.
+    if not force_hard and os.environ.get('SERVEONE_DESKTOP_MODE') != '1' and (getattr(_UPLOAD_JOB_EXECUTING, 'on', False) or _upload_proc_active()):
         _soft_invalidate_response_caches()
         return
     with _READ_CACHE_LOCK:
@@ -1713,6 +1830,19 @@ def clear_runtime_caches():
     try:
         _CR_ANALYSIS_CACHE_V632722.clear()
     except (NameError, AttributeError):
+        pass
+    # Wipe disk dashboard snapshots so newly committed data is recalculated
+    try:
+        if os.path.exists(_DASHBOARD_SNAPSHOT_DIR):
+            for _sn in os.listdir(_DASHBOARD_SNAPSHOT_DIR):
+                if _sn.endswith('.json'):
+                    try: os.remove(os.path.join(_DASHBOARD_SNAPSHOT_DIR, _sn))
+                    except Exception: pass
+    except Exception:
+        pass
+    try:
+        _publish_data_revision()
+    except Exception:
         pass
 
 
@@ -7429,9 +7559,9 @@ def _master_pic_columns(df):
 def _master_client_pic_columns(df):
     """Column detector for the 'By Client ID' sheet of the Master PIC template."""
     return {
-        'client_id': find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code']),
-        'client_name': find_column(df, ['Client Name', 'Client Nm.', 'Client Nm', 'Client', 'Operation Unit Name', 'Op Unit']),
-        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC']),
+        'client_id': find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code', 'ID Client', 'Kode Client']),
+        'client_name': find_column(df, ['Client Name', 'Client Nm.', 'Client Nm', 'Client', 'Operation Unit Name', 'Operation Unit', 'Op Unit', 'Customer', 'Customer Name', 'Nama Client', 'Nama Klien', 'KLI', 'HLI']),
+        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC', 'PIC Client', 'Update New PIC', 'New PIC']),
     }
 
 
@@ -7440,7 +7570,7 @@ def _master_vendor_pic_columns(df):
     return {
         'vendor_id': find_column(df, ['Vendor ID', 'Vendor Id', 'VendorID', 'Vendor Code', 'Supplier ID', 'Supplier Code']),
         'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor', 'Supplier Name', 'Supplier']),
-        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC']),
+        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC', 'PIC Vendor', 'Update New PIC', 'New PIC']),
     }
 
 
@@ -7448,7 +7578,7 @@ def _master_bid_type_pic_columns(df):
     """Column detector for the 'By Bid Type' sheet of the Master PIC template."""
     return {
         'bid_type': find_column(df, ['Bid Type', 'Bid Except Type', 'Bid Type Name']),
-        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC']),
+        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC', 'Update New PIC', 'New PIC']),
     }
 
 
@@ -7463,20 +7593,24 @@ def _detect_master_pic_sheet_kind(sheet_name, df):
     name_lower = str(sheet_name or '').lower().strip()
     # Try column-based detection first — most reliable.
     has_category = bool(find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']))
-    has_client_id = bool(find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code']))
+    has_client_id = bool(find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code', 'ID Client', 'Kode Client']))
+    has_client_name = bool(find_column(df, ['Client Name', 'Client Nm.', 'Client Nm', 'Client', 'Operation Unit Name', 'Operation Unit', 'Op Unit', 'Nama Client', 'Nama Klien']))
     has_vendor_id = bool(find_column(df, ['Vendor ID', 'Vendor Id', 'VendorID', 'Vendor Code', 'Supplier ID', 'Supplier Code']))
+    has_vendor_name = bool(find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor', 'Supplier Name', 'Supplier']))
     has_bid_type = bool(find_column(df, ['Bid Type', 'Bid Except Type', 'Bid Type Name']))
-    if has_category and not has_client_id and not has_vendor_id and not has_bid_type:
+    has_pic = bool(find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC', 'Update New PIC', 'New PIC']))
+
+    if has_category and not (has_client_id or has_client_name or has_vendor_id or has_bid_type):
         return 'category'
-    if has_client_id:
+    if has_client_id or (has_client_name and has_pic and not has_vendor_id and not has_bid_type):
         return 'client'
-    if has_vendor_id:
+    if has_vendor_id or (has_vendor_name and has_pic and not has_bid_type):
         return 'vendor'
     if has_bid_type:
         return 'bid_type'
     # Fall back to sheet name hints.
-    if 'client' in name_lower: return 'client'
-    if 'vendor' in name_lower: return 'vendor'
+    if any(k in name_lower for k in ('client', 'klien', 'kli', 'hli', 'op unit')): return 'client'
+    if any(k in name_lower for k in ('vendor', 'supplier')): return 'vendor'
     if 'bid' in name_lower: return 'bid_type'
     if 'categ' in name_lower: return 'category'
     return None
@@ -7577,13 +7711,16 @@ def apply_item_registration_pic_filter(query, pics):
         elif stock_no_str and stock_no_str.upper().startswith('B'):
             resolved_pic = 'SARINA'
         else:
-            # Fall through to Master PIC resolution
+            # Fall through to Master PIC resolution (Bid Type > Client > Category)
             pic = None
-            cid = normalize_client_id(cid_val) if cid_val else ''
-            if cid and cid in _client_pic_cache: pic = _client_pic_cache[cid]
-            if not pic and bt_val:
+            if bt_val:
                 bt = clean(bt_val)
-                if bt and bt in _bid_type_pic_cache: pic = _bid_type_pic_cache[bt]
+                if bt:
+                    bt_l = bt.lower()
+                    pic = _bid_type_pic_cache.get(bt) or next((v for k, v in _bid_type_pic_cache.items() if str(k or '').strip().lower() == bt_l), None)
+            if not pic:
+                cid = normalize_client_id(cid_val) if cid_val else ''
+                if cid and cid in _client_pic_cache: pic = _client_pic_cache[cid]
             if not pic:
                 cat_id = normalize_category_id(cat_id_val)
                 cat_name = normalize_category_name(cat_val)
@@ -7748,6 +7885,19 @@ def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=N
     # per baris (pola N+1). Jika maps tidak diberikan, perilaku lama (query
     # DB per lookup) tetap berlaku — kompatibel dengan semua pemanggil lama.
     maps = maps or {}
+    # Bid Type rule (e.g. Imported Product Request Purchasing -> SARINA) takes top priority (case-insensitive)
+    if bid_except_type:
+        bt = clean(bid_except_type)
+        if bt:
+            bt_l = bt.lower()
+            pic = None
+            if maps.get('bid_type') is not None:
+                bt_map = maps['bid_type']
+                pic = bt_map.get(bt) or bt_map.get(bt_l) or next((v for k, v in bt_map.items() if str(k or '').strip().lower() == bt_l), None)
+            else:
+                r = db.session.query(MasterBidTypePIC.pic_name).filter(func.lower(MasterBidTypePIC.bid_type) == bt_l).first()
+                pic = clean(r[0]) if r else None
+            if pic: return pic
     if client_id:
         cid = normalize_client_id(client_id)
         if cid:
@@ -7756,16 +7906,6 @@ def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=N
                 pic = maps['client'].get(cid) or None
             else:
                 r = db.session.query(MasterClientPIC.pic_name).filter(MasterClientPIC.client_id == cid).first()
-                pic = clean(r[0]) if r else None
-            if pic: return pic
-    if bid_except_type:
-        bt = clean(bid_except_type)
-        if bt:
-            pic = None
-            if maps.get('bid_type') is not None:
-                pic = maps['bid_type'].get(bt) or None
-            else:
-                r = db.session.query(MasterBidTypePIC.pic_name).filter(MasterBidTypePIC.bid_type == bt).first()
                 pic = clean(r[0]) if r else None
             if pic: return pic
     if vendor_id:
@@ -8427,11 +8567,14 @@ def get_dashboard_stats():
         ).all()
         for cid_val, bt_val, cat_id_val, cat_val, pic_val, client_val in pic_rows:
             pic = None
-            cid = normalize_client_id(cid_val) if cid_val else ''
-            if cid and cid in _ir_client_pic_cache: pic = _ir_client_pic_cache[cid]
-            if not pic and bt_val:
+            if bt_val:
                 bt = clean(bt_val)
-                if bt and bt in _ir_bid_type_pic_cache: pic = _ir_bid_type_pic_cache[bt]
+                if bt:
+                    bt_l = bt.lower()
+                    pic = _ir_bid_type_pic_cache.get(bt) or next((v for k, v in _ir_bid_type_pic_cache.items() if str(k or '').strip().lower() == bt_l), None)
+            if not pic:
+                cid = normalize_client_id(cid_val) if cid_val else ''
+                if cid and cid in _ir_client_pic_cache: pic = _ir_client_pic_cache[cid]
             if not pic:
                 cat_id = normalize_category_id(cat_id_val)
                 cat_name = normalize_category_name(cat_val)
@@ -9655,25 +9798,39 @@ def _refresh_so_pic_names(so_items_scope=None, product_ids_scope=None):
     """Helper function (BUKAN route handler!) — refresh pic_name untuk SO rows.
     Me-return jumlah baris yang di-refresh (int).
 
-    Optimization: by default only refresh rows whose so_item is in
-    `so_items_scope` (e.g., the items just uploaded) OR whose product_id is
-    in `product_ids_scope`. This avoids iterating ALL SO rows on every upload.
-    If both are None, falls back to refreshing all rows (used by master-pic uploads).
-
-    FIX V3: sebelumnya function ini disertai decorator @app.route('/api/upload/smro', ...)
-    yang membuat Flask mendaftarkannya sebagai view function untuk endpoint upload.
-    Akibatnya, saat client POST /api/upload/smro, Flask memanggil function ini dan
-    mendapat return value int → throw TypeError → HTTP 500.
-
-    Decorator @app.route sekarang DIPINDAHKAN ke upload_smro() yang benar.
+    Priority: Client PIC > Vendor PIC > Category PIC.
+    Mendukung pencocokan Client lewat client_id, operation_unit_id, dan operation_unit_name.
     """
     prod_map = {str(p.product_id).strip(): (p.category_id, p.category_name) for p in db.session.query(ProductIDDB).all() if p.product_id}
-    client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
-    vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
+    
+    # Client PIC caches: by ID and by normalized Name
+    client_pic_by_id = {}
+    client_pic_by_name = {}
+    for m in db.session.query(MasterClientPIC).all():
+        pname = clean(m.pic_name)
+        if not pname: continue
+        if m.client_id:
+            client_pic_by_id[normalize_client_id(m.client_id)] = pname
+        if m.client_name:
+            client_pic_by_name[normalize_category_name(m.client_name)] = pname
+
+    # Vendor PIC caches: by ID and by normalized Name
+    vendor_pic_by_id = {}
+    vendor_pic_by_name = {}
+    for m in db.session.query(MasterVendorPIC).all():
+        pname = clean(m.pic_name)
+        if not pname: continue
+        if m.vendor_id:
+            vendor_pic_by_id[normalize_vendor_id(m.vendor_id)] = pname
+        if m.vendor_name:
+            vendor_pic_by_name[normalize_category_name(m.vendor_name)] = pname
+
     cat_pic_cache = {}
-    # Scope the refresh to rows that actually need it — much faster than
-    # iterating every SO row in the table on every upload.
-    q = db.session.query(SOData).filter(SOData.product_id.isnot(None), SOData.product_id != '')
+
+    # Scope the refresh to rows that actually need it.
+    # When both scopes are None, refresh ALL SO rows so Client/Vendor PIC can match
+    # even rows without a product_id.
+    q = db.session.query(SOData)
     so_rows = []
     if so_items_scope is not None:
         scope = [s for s in so_items_scope if s]
@@ -9687,19 +9844,54 @@ def _refresh_so_pic_names(so_items_scope=None, product_ids_scope=None):
             so_rows.extend(q.filter(SOData.product_id.in_(scope[_start:_start + 400])).all())
     else:
         so_rows = q.all()  # explicit full refresh for master PIC changes
+
     refreshed = 0
     for s in so_rows:
-        cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
-        ck = (normalize_category_id(cat_id), normalize_category_name(cat_name))
-        if ck not in cat_pic_cache: cat_pic_cache[ck] = _lookup_pic_by_category(cat_id, cat_name)
         new_pic = None
+        # 1. Client PIC (Priority 1): match client_id, operation_unit_id, operation_unit_name
         cid = normalize_client_id(s.client_id) if s.client_id else ''
-        if cid and cid in client_pic_cache: new_pic = client_pic_cache[cid]
+        opid = normalize_client_id(s.operation_unit_id) if s.operation_unit_id else ''
+        if cid and cid in client_pic_by_id:
+            new_pic = client_pic_by_id[cid]
+        elif opid and opid in client_pic_by_id:
+            new_pic = client_pic_by_id[opid]
+        elif s.operation_unit_name:
+            norm_opname = normalize_category_name(s.operation_unit_name)
+            if norm_opname in client_pic_by_name:
+                new_pic = client_pic_by_name[norm_opname]
+            else:
+                for cname_key, cpic in client_pic_by_name.items():
+                    if len(cname_key) >= 3 and (cname_key in norm_opname or norm_opname in cname_key):
+                        new_pic = cpic
+                        break
+
+        # 2. Vendor PIC (Priority 2): match vendor_id, vendor_name
         if not new_pic:
             vid = normalize_vendor_id(s.vendor_id) if s.vendor_id else ''
-            if vid and vid in vendor_pic_cache: new_pic = vendor_pic_cache[vid]
-        if not new_pic: new_pic = cat_pic_cache[ck]
-        if s.pic_name != new_pic: s.pic_name = new_pic; refreshed += 1
+            if vid and vid in vendor_pic_by_id:
+                new_pic = vendor_pic_by_id[vid]
+            elif s.vendor_name:
+                norm_vname = normalize_category_name(s.vendor_name)
+                if norm_vname in vendor_pic_by_name:
+                    new_pic = vendor_pic_by_name[norm_vname]
+                else:
+                    for vname_key, vpic in vendor_pic_by_name.items():
+                        if len(vname_key) >= 3 and (vname_key in norm_vname or norm_vname in vname_key):
+                            new_pic = vpic
+                            break
+
+        # 3. Category PIC (Priority 3): by product_id
+        if not new_pic and s.product_id:
+            cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
+            ck = (normalize_category_id(cat_id), normalize_category_name(cat_name))
+            if ck not in cat_pic_cache:
+                cat_pic_cache[ck] = _lookup_pic_by_category(cat_id, cat_name)
+            new_pic = cat_pic_cache[ck]
+
+        if s.pic_name != new_pic:
+            s.pic_name = new_pic
+            refreshed += 1
+
     if refreshed:
         db.session.commit()
     clear_runtime_caches()
@@ -9773,9 +9965,11 @@ def upload_smro():
         # 1,000 rows = 1,000 SQL queries just for PIC lookup).
         _pic_lookup_cache = _build_pic_lookup_cache()
         # Same override priority as _refresh_so_pic_names so rows routed
-        # directly to compact history keep the correct PIC.
-        _client_pic_direct = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
-        _vendor_pic_direct = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
+        # directly to compact history keep the correct PIC (Client > Vendor > Category).
+        _client_pic_direct = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name) and m.client_id}
+        _client_name_pic_direct = {normalize_category_name(m.client_name): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name) and m.client_name}
+        _vendor_pic_direct = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name) and m.vendor_id}
+        _vendor_name_pic_direct = {normalize_category_name(m.vendor_name): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name) and m.vendor_name}
 
         # V63.27: siapkan commit bertahap. expire_on_commit=False agar objek
         # ORM yang sudah ter-commit tidak di-refresh satu per satu
@@ -9898,9 +10092,43 @@ def upload_smro():
                 # V63.27.15: route old finalized IDR rows directly to compact
                 # history. Re-uploading old data therefore does not re-inflate raw DB.
                 _cid_direct = normalize_client_id(new_data.get('client_id')) if new_data.get('client_id') else ''
+                _opid_direct = normalize_client_id(new_data.get('operation_unit_id')) if new_data.get('operation_unit_id') else ''
                 _vid_direct = normalize_vendor_id(new_data.get('vendor_id')) if new_data.get('vendor_id') else ''
-                _pic_for_row = (_client_pic_direct.get(_cid_direct) if _cid_direct else None) or (_vendor_pic_direct.get(_vid_direct) if _vid_direct else None)
-                if not _pic_for_row and new_data.get('product_id'): _pic_for_row = _batch_lookup_pic(new_data.get('product_id'), _pic_lookup_cache)
+                _opname_direct = normalize_category_name(new_data.get('operation_unit_name')) if new_data.get('operation_unit_name') else ''
+                _vname_direct = normalize_category_name(new_data.get('vendor_name')) if new_data.get('vendor_name') else ''
+
+                # Priority 1: Client PIC (by client_id, operation_unit_id, operation_unit_name)
+                _pic_for_row = None
+                if _cid_direct and _cid_direct in _client_pic_direct:
+                    _pic_for_row = _client_pic_direct[_cid_direct]
+                elif _opid_direct and _opid_direct in _client_pic_direct:
+                    _pic_for_row = _client_pic_direct[_opid_direct]
+                elif _opname_direct:
+                    if _opname_direct in _client_name_pic_direct:
+                        _pic_for_row = _client_name_pic_direct[_opname_direct]
+                    else:
+                        for _cnk, _cnp in _client_name_pic_direct.items():
+                            if len(_cnk) >= 3 and (_cnk in _opname_direct or _opname_direct in _cnk):
+                                _pic_for_row = _cnp
+                                break
+
+                # Priority 2: Vendor PIC (by vendor_id, vendor_name)
+                if not _pic_for_row:
+                    if _vid_direct and _vid_direct in _vendor_pic_direct:
+                        _pic_for_row = _vendor_pic_direct[_vid_direct]
+                    elif _vname_direct:
+                        if _vname_direct in _vendor_name_pic_direct:
+                            _pic_for_row = _vendor_name_pic_direct[_vname_direct]
+                        else:
+                            for _vnk, _vnp in _vendor_name_pic_direct.items():
+                                if len(_vnk) >= 3 and (_vnk in _vname_direct or _vname_direct in _vnk):
+                                    _pic_for_row = _vnp
+                                    break
+
+                # Priority 3: Category PIC (by product_id)
+                if not _pic_for_row and new_data.get('product_id'):
+                    _pic_for_row = _batch_lookup_pic(new_data.get('product_id'), _pic_lookup_cache)
+
                 _action, _hp = _so_history_route_dict(new_data, pic_name=_pic_for_row)
                 _hk = _so_history_source_key_from_item(so_item_val)
                 if _action == 'archive' and _hp is not None:
@@ -9935,11 +10163,11 @@ def upload_smro():
                         existing.purchasing_amount_idr = preserved_amount_idr; existing.purchasing_amount_idr_cached_at = preserved_amount_idr_cached_at
                     if not col_spec or spec_val is None: existing.specification = preserved_spec
                     if not col_pid or pid_val is None: existing.product_id = preserved_pid
-                    if existing.product_id: existing.pic_name = _batch_lookup_pic(existing.product_id, _pic_lookup_cache)
+                    existing.pic_name = _pic_for_row
                     updated += 1
                 else:
                     new_rec = SOData(**new_data)
-                    if new_rec.product_id: new_rec.pic_name = _batch_lookup_pic(new_rec.product_id, _pic_lookup_cache)
+                    new_rec.pic_name = _pic_for_row
                     db.session.add(new_rec)
                     if so_item_val: existing_so[so_item_val] = new_rec
                     inserted += 1
@@ -13094,56 +13322,112 @@ def upload_master_pic():
 
             elif kind == 'client':
                 col = _master_client_pic_columns(df)
-                if not col.get('client_id'):
+                if not col.get('client_id') and not col.get('client_name'):
                     continue
+                # Preload existing SO client names to resolve client_id from client_name
+                _so_clients = {}
+                try:
+                    for _cid, _opid, _opname in db.session.query(SOData.client_id, SOData.operation_unit_id, SOData.operation_unit_name).distinct():
+                        if _opname:
+                            _norm_n = normalize_category_name(_opname)
+                            if _norm_n and _norm_n not in _so_clients:
+                                _so_clients[_norm_n] = _cid or _opid
+                except Exception:
+                    pass
+
                 for _, row in df.iterrows():
-                    cid_raw = clean(df_val(row, col['client_id']))
-                    if not cid_raw:
-                        continue
-                    cid = normalize_client_id(cid_raw)
-                    cname = clean(df_val(row, col['client_name']))
+                    cid_raw = clean(df_val(row, col['client_id'])) if col.get('client_id') else None
+                    cname = clean(df_val(row, col['client_name'])) if col.get('client_name') else None
                     pic_name = clean(df_val(row, col['pic']))
                     if not pic_name:
                         continue
+                    if not cid_raw and not cname:
+                        continue
+
+                    # If client_id is missing, attempt matching by client_name from so_data
+                    if not cid_raw and cname:
+                        _norm_cname = normalize_category_name(cname)
+                        matched_cid = _so_clients.get(_norm_cname)
+                        if not matched_cid:
+                            for _sn, _scid in _so_clients.items():
+                                if _norm_cname in _sn or _sn in _norm_cname:
+                                    matched_cid = _scid
+                                    break
+                        cid_raw = matched_cid or f"CLIENT_{hashlib.md5(cname.encode('utf-8')).hexdigest()[:10]}"
+
+                    cid = normalize_client_id(cid_raw)
                     latest_client_ids.add(cid)
                     existing = client_pic_by_id.get(cid)
+                    if not existing and cname:
+                        for _rec in client_pic_by_id.values():
+                            if _rec.client_name and normalize_category_name(_rec.client_name) == normalize_category_name(cname):
+                                existing = _rec
+                                break
                     if existing:
                         changed = (clean(existing.pic_name) != pic_name or clean(existing.client_name) != cname)
-                        existing.client_name = cname
+                        if cname: existing.client_name = cname
                         existing.pic_name = pic_name
                         existing.updated_at = datetime.utcnow()
                         if changed: stats['client']['updated'] += 1
                         else: stats['client']['unchanged'] += 1
                     else:
-                        new_rec = MasterClientPIC(client_id=cid, client_name=cname, pic_name=pic_name, updated_at=datetime.utcnow())
+                        new_rec = MasterClientPIC(client_id=cid, client_name=cname or cid, pic_name=pic_name, updated_at=datetime.utcnow())
                         db.session.add(new_rec)
                         stats['client']['added'] += 1
                         client_pic_by_id[cid] = new_rec
 
             elif kind == 'vendor':
                 col = _master_vendor_pic_columns(df)
-                if not col.get('vendor_id'):
+                if not col.get('vendor_id') and not col.get('vendor_name'):
                     continue
+                # Preload existing SO vendor names to resolve vendor_id from vendor_name
+                _so_vendors = {}
+                try:
+                    for _vid, _vname in db.session.query(SOData.vendor_id, SOData.vendor_name).distinct():
+                        if _vname:
+                            _norm_vn = normalize_category_name(_vname)
+                            if _norm_vn and _norm_vn not in _so_vendors:
+                                _so_vendors[_norm_vn] = _vid
+                except Exception:
+                    pass
+
                 for _, row in df.iterrows():
-                    vid_raw = clean(df_val(row, col['vendor_id']))
-                    if not vid_raw:
-                        continue
-                    vid = normalize_vendor_id(vid_raw)
-                    vname = clean(df_val(row, col['vendor_name']))
+                    vid_raw = clean(df_val(row, col['vendor_id'])) if col.get('vendor_id') else None
+                    vname = clean(df_val(row, col['vendor_name'])) if col.get('vendor_name') else None
                     pic_name = clean(df_val(row, col['pic']))
                     if not pic_name:
                         continue
+                    if not vid_raw and not vname:
+                        continue
+
+                    # If vendor_id is missing, attempt matching by vendor_name from so_data
+                    if not vid_raw and vname:
+                        _norm_vname = normalize_category_name(vname)
+                        matched_vid = _so_vendors.get(_norm_vname)
+                        if not matched_vid:
+                            for _vn, _svid in _so_vendors.items():
+                                if _norm_vname in _vn or _vn in _norm_vname:
+                                    matched_vid = _svid
+                                    break
+                        vid_raw = matched_vid or f"VENDOR_{hashlib.md5(vname.encode('utf-8')).hexdigest()[:10]}"
+
+                    vid = normalize_vendor_id(vid_raw)
                     latest_vendor_ids.add(vid)
                     existing = vendor_pic_by_id.get(vid)
+                    if not existing and vname:
+                        for _rec in vendor_pic_by_id.values():
+                            if _rec.vendor_name and normalize_category_name(_rec.vendor_name) == normalize_category_name(vname):
+                                existing = _rec
+                                break
                     if existing:
                         changed = (clean(existing.pic_name) != pic_name or clean(existing.vendor_name) != vname)
-                        existing.vendor_name = vname
+                        if vname: existing.vendor_name = vname
                         existing.pic_name = pic_name
                         existing.updated_at = datetime.utcnow()
                         if changed: stats['vendor']['updated'] += 1
                         else: stats['vendor']['unchanged'] += 1
                     else:
-                        new_rec = MasterVendorPIC(vendor_id=vid, vendor_name=vname, pic_name=pic_name, updated_at=datetime.utcnow())
+                        new_rec = MasterVendorPIC(vendor_id=vid, vendor_name=vname or vid, pic_name=pic_name, updated_at=datetime.utcnow())
                         db.session.add(new_rec)
                         stats['vendor']['added'] += 1
                         vendor_pic_by_id[vid] = new_rec
@@ -13302,75 +13586,326 @@ def vendor_control_debug():
 @app.route('/api/vendor-control/data', methods=['GET'])
 def get_vendor_control_data():
     try:
+        from vendor_master_service import load_vendor_master_rows, filter_vendor_rows
         page = max(int(request.args.get('page', 1)), 1)
         per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
-        search = (clean(request.args.get('search')) or '').lower()
+        search = clean(request.args.get('search')) or ''
         vendors = [clean(v) for v in request.args.getlist('vendor') if clean(v)]
-        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
-        # V62.2 FIX: kegagalan sinkronisasi Google Sheets (kredensial tidak ada,
-        # token expired, sheet tidak terjangkau) sebelumnya melempar HTTP 500 sehingga
-        # seluruh halaman Vendor Control tampil sebagai error. Sekarang didegradasi
-        # secara halus: daftar kosong + flag sync_warning (HTTP 200).
-        sync_warning = None
-        try:
-            # On desktop this loads the encrypted offline snapshot; only the
-            # explicit sync worker can call Google Sheets over the network.
-            rows, fetched_at = vendor_control_rows(force=force)
-        except Exception as sync_err:
-            rows, fetched_at = [], None
-            sync_warning = str(sync_err)
-        if vendors:
-            vendor_needles = [v.lower() for v in vendors]
-            rows = [row for row in rows if any(
-                needle == str(row.get('vendor_name') or '').lower()
-                or needle == str(row.get('vendor_id') or '').lower()
-                or needle in str(row.get('vendor_name') or '').lower()
-                or needle in str(row.get('vendor_id') or '').lower()
-                for needle in vendor_needles
-            )]
-        if search:
-            rows = [row for row in rows if search in str(row.get('vendor_name') or '').lower() or search in str(row.get('vendor_id') or '').lower()]
-        rows = sorted(rows, key=lambda row: (str(row.get('vendor_name') or '').lower(), str(row.get('vendor_id') or '').lower()))
-        total = len(rows)
+        brands = [clean(b) for b in request.args.getlist('brand') if clean(b)]
+        locations = [clean(loc) for loc in request.args.getlist('location') if clean(loc)]
+
+        all_rows, last_updated = load_vendor_master_rows(
+            db,
+            inject_brand_fn=_inject_brand_handling_from_sodata,
+            legacy_rows_loader=lambda: vendor_control_rows(force=False),
+            sodata_model=SOData,
+        )
+
+        # Build filter options from full local vendor_master dataset
+        vendor_options = sorted({r['vendor_name'] for r in all_rows if r.get('vendor_name')})
+        location_options = sorted({r['city_province'] for r in all_rows if r.get('city_province')})
+        brand_set = set()
+        so_brand_set = set()
+        web_brand_set = set()
+        empty_address_count = 0
+        for r in all_rows:
+            if not r.get('city_province'):
+                empty_address_count += 1
+            bh = r.get('brand_handling') or {}
+            for b in (bh.get('all') or []):
+                if b:
+                    brand_set.add(b)
+                    so_brand_set.add(b.lower())
+            for b in (bh.get('web') or []):
+                if b:
+                    brand_set.add(b)
+                    web_brand_set.add(b.lower())
+
+        filtered = filter_vendor_rows(
+            all_rows,
+            search_raw=search,
+            vendors=vendors,
+            brands=brands,
+            locations=locations,
+        )
+        total = len(filtered)
         start = (page - 1) * per_page
         return jsonify({
-            'data': rows[start:start + per_page],
+            'data': filtered[start:start + per_page],
             'total': total,
             'page': page,
             'per_page': per_page,
-            'suggestions': [row.get('vendor_name') for row in rows[:20] if row.get('vendor_name')],
-            'last_updated': utc_isoformat(fetched_at) if fetched_at else None,
-            'sync_warning': sync_warning,
+            'total_pages': max(1, (total + per_page - 1) // per_page),
+            'last_updated': last_updated,
+            'vendor_options': vendor_options,
+            'brand_options': sorted(brand_set),
+            'location_options': location_options,
+            'stats': {
+                'total_vendors': len(all_rows),
+                'empty_address_count': empty_address_count,
+                'total_brands': len(brand_set),
+                'so_brands_count': len(so_brand_set),
+                'web_brands_count': len(web_brand_set),
+            },
         })
     except Exception as e:
         import traceback; traceback.print_exc()
-        return jsonify({
-            'error': str(e),
-            'hint': 'Check PythonAnywhere WSGI credential path, google-api-python-client/google-auth installation, service account sheet permission, and Vendor Control sheet headers.'
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/api/vendor-control/<path:row_key>', methods=['PUT'])
+
+@app.route('/api/vendor-control/template', methods=['GET'])
+def download_vendor_control_template():
+    try:
+        from vendor_master_service import load_vendor_master_rows, build_vendor_template_xlsx
+        all_rows, _ = load_vendor_master_rows(
+            db,
+            inject_brand_fn=None,
+            legacy_rows_loader=lambda: vendor_control_rows(force=False),
+            sodata_model=SOData,
+        )
+        buf = build_vendor_template_xlsx(all_rows)
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name='Vendor_Template.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/vendor-control/upload', methods=['POST'])
+def upload_vendor_control_excel():
+    try:
+        from vendor_master_service import import_vendor_excel
+        f = request.files.get('file')
+        if not f or not f.filename:
+            return jsonify({'error': 'Pilih file Excel (.xlsx) terlebih dahulu.'}), 400
+        res = import_vendor_excel(db, f.read())
+        clear_runtime_caches()
+        return jsonify({
+            'success': True,
+            'inserted': res['inserted'],
+            'updated': res['updated'],
+            'skipped': res['skipped'],
+            'message': f"Berhasil import Excel: {res['inserted']} baru, {res['updated']} diperbarui.",
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/vendor-control/export', methods=['GET'])
+def export_vendor_control_excel():
+    try:
+        from vendor_master_service import load_vendor_master_rows, filter_vendor_rows, export_vendor_excel
+        search = clean(request.args.get('search')) or ''
+        vendors = [clean(v) for v in request.args.getlist('vendor') if clean(v)]
+        brands = [clean(b) for b in request.args.getlist('brand') if clean(b)]
+        locations = [clean(loc) for loc in request.args.getlist('location') if clean(loc)]
+        all_rows, _ = load_vendor_master_rows(
+            db,
+            inject_brand_fn=_inject_brand_handling_from_sodata,
+            legacy_rows_loader=lambda: vendor_control_rows(force=False),
+            sodata_model=SOData,
+        )
+        filtered = filter_vendor_rows(all_rows, search_raw=search, vendors=vendors, brands=brands, locations=locations)
+        buf = export_vendor_excel(filtered)
+        fname = f"Vendor_List_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name=fname,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/vendor-control/add', methods=['POST'])
+def add_vendor_control_row():
+    try:
+        from vendor_master_service import ensure_vendor_master_table, _parse_web_brands
+        ensure_vendor_master_table(db)
+        data = request.json or {}
+        vn = clean(data.get('vendor_name')) or ''
+        if not vn:
+            return jsonify({'error': 'Vendor Name wajib diisi.'}), 400
+        cp = clean(data.get('city_province')) or ''
+        vid = clean(data.get('vendor_id')) or ''
+        pwd = clean(data.get('password')) or ''
+        wb = _parse_web_brands(data.get('web_brands'))
+        now_iso = datetime.utcnow().isoformat() + 'Z'
+        db.session.execute(text("""
+            INSERT INTO vendor_master
+            (vendor_name, city_province, vendor_id, password, web_brands, source_url, updated_at)
+            VALUES (:vn, :cp, :vid, :pwd, :wb, '', :upd)
+        """), {
+            'vn': vn,
+            'cp': cp,
+            'vid': vid,
+            'pwd': pwd,
+            'wb': json.dumps(wb, ensure_ascii=False),
+            'upd': now_iso,
+        })
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({'success': True, 'message': f'Vendor "{vn}" berhasil ditambahkan.'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/vendor-control/lookup-internet', methods=['POST'])
+def lookup_vendor_control_internet():
+    try:
+        from vendor_master_service import (
+            ensure_vendor_master_table,
+            lookup_vendor_internet,
+            _parse_web_brands,
+        )
+        ensure_vendor_master_table(db)
+        data = request.json or {}
+        row_ids = data.get('row_ids')
+        if not isinstance(row_ids, list):
+            single_id = data.get('row_id') or data.get('id')
+            row_ids = [single_id] if single_id is not None else []
+        row_ids = [int(x) for x in row_ids if str(x).strip().isdigit()][:10]
+        if not row_ids:
+            # Automatically pick up to 10 vendors whose city_province is still empty
+            empty_rows = db.session.execute(text("""
+                SELECT id FROM vendor_master
+                WHERE TRIM(COALESCE(city_province, '')) = ''
+                ORDER BY LOWER(vendor_name)
+                LIMIT 10
+            """)).fetchall()
+            row_ids = [r[0] for r in empty_rows]
+        if not row_ids:
+            return jsonify({'success': True, 'results': [], 'message': 'Semua alamat vendor sudah terisi.'})
+
+        mode = str(data.get('mode') or 'both').lower()  # 'both' | 'address' | 'brand'
+        # Never overwrite an already-filled/edited city_province!
+        overwrite_address = False
+
+        # Gather known SOData brands once for accurate brand matching
+        so_brands = db.session.query(SOData.manufacturer_name).filter(
+            SOData.manufacturer_name.isnot(None),
+            SOData.manufacturer_name != ''
+        ).distinct().all()
+        known_brands = [clean(b[0]) for b in so_brands if clean(b[0])]
+
+        results = []
+        now_iso = datetime.utcnow().isoformat() + 'Z'
+        for rid in row_ids:
+            row = db.session.execute(text(
+                "SELECT id, vendor_name, city_province, web_brands, source_url FROM vendor_master WHERE id = :id"
+            ), {'id': rid}).fetchone()
+            if not row:
+                continue
+            vid_id, vn, existing_cp, existing_wb, existing_url = row
+            found = lookup_vendor_internet(vn, known_brands=known_brands)
+            new_cp = clean(existing_cp) or ''
+            if mode in ('both', 'address') and found.get('city_province'):
+                if overwrite_address or not new_cp:
+                    new_cp = found['city_province']
+            merged_wb = _parse_web_brands(existing_wb)
+            if mode in ('both', 'brand') and found.get('web_brands'):
+                seen = {b.lower() for b in merged_wb}
+                for b in found['web_brands']:
+                    if b.lower() not in seen:
+                        merged_wb.append(b)
+                        seen.add(b.lower())
+            new_url = found.get('source_url') or clean(existing_url) or ''
+            db.session.execute(text("""
+                UPDATE vendor_master
+                SET city_province = :cp, web_brands = :wb, source_url = :url, updated_at = :upd
+                WHERE id = :id
+            """), {
+                'cp': new_cp,
+                'wb': json.dumps(merged_wb, ensure_ascii=False),
+                'url': new_url,
+                'upd': now_iso,
+                'id': vid_id,
+            })
+            results.append({
+                'id': vid_id,
+                'vendor_name': vn,
+                'city_province': new_cp,
+                'web_brands': merged_wb,
+                'source_url': new_url,
+                'found': found.get('found', False),
+                'warning': found.get('warning') or '',
+            })
+        db.session.commit()
+        return jsonify({'success': True, 'results': results})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/vendor-control/<path:row_key>', methods=['PUT', 'DELETE'])
 def update_vendor_control(row_key):
     try:
-        data = request.json or {}
-        field = clean(data.get('field')) or ''
-        value = clean(data.get('value')) or ''
-        if field not in ('vendor_id', 'password'):
-            return jsonify({'error': 'Only Vendor ID and Password can be edited'}), 400
+        from vendor_master_service import ensure_vendor_master_table, _parse_web_brands
+        ensure_vendor_master_table(db)
         try:
-            sheet_row = int(str(row_key).strip())
+            row_id = int(str(row_key).strip())
         except ValueError:
             return jsonify({'error': 'Invalid vendor row key'}), 400
-        sync = sync_vendor_control_cell(sheet_row, field, value)
-        if sync.get('synced'):
-            for row in VENDOR_CONTROL_CACHE.get('rows') or []:
-                if str(row.get('row_key')) == str(row_key):
-                    row[field] = value
-            editor = globals().get('_DESKTOP_VENDOR_SNAPSHOT_EDITOR')
-            if os.environ.get('SERVEONE_DESKTOP_MODE') == '1' and callable(editor):
-                editor(row_key, field, value)
-        return jsonify({'success': True, 'sheet_sync': sync})
+
+        if request.method == 'DELETE':
+            db.session.execute(text("DELETE FROM vendor_master WHERE id = :id"), {'id': row_id})
+            db.session.commit()
+            clear_runtime_caches()
+            return jsonify({'success': True})
+
+        data = request.json or {}
+        allowed = ('vendor_name', 'city_province', 'vendor_id', 'password', 'web_brands')
+        now_iso = datetime.utcnow().isoformat() + 'Z'
+
+        # Support multi-field modal save: { fields: { vendor_name, city_province, vendor_id, password, web_brands } }
+        if isinstance(data.get('fields'), dict):
+            updates = {}
+            for k, v in data['fields'].items():
+                if k not in allowed:
+                    continue
+                if k == 'web_brands':
+                    updates[k] = json.dumps(_parse_web_brands(v), ensure_ascii=False)
+                else:
+                    updates[k] = clean(v) or ''
+            if not updates:
+                return jsonify({'error': 'Tidak ada perubahan yang valid.'}), 400
+            if 'vendor_name' in updates and not updates['vendor_name']:
+                return jsonify({'error': 'Vendor Name tidak boleh kosong.'}), 400
+            set_sql = ', '.join([f"{k} = :{k}" for k in updates.keys()]) + ', updated_at = :upd'
+            params = dict(updates)
+            params['upd'] = now_iso
+            params['id'] = row_id
+            db.session.execute(text(f"UPDATE vendor_master SET {set_sql} WHERE id = :id"), params)
+            db.session.commit()
+            clear_runtime_caches()
+            return jsonify({'success': True, 'updated_fields': list(updates.keys())})
+
+        field = clean(data.get('field')) or ''
+        value = data.get('value')
+        if field not in allowed:
+            return jsonify({'error': f'Field tidak didukung: {field}'}), 400
+
+        if field == 'web_brands':
+            store_val = json.dumps(_parse_web_brands(value), ensure_ascii=False)
+        else:
+            store_val = clean(value) or ''
+
+        db.session.execute(
+            text(f"UPDATE vendor_master SET {field} = :val, updated_at = :upd WHERE id = :id"),
+            {'val': store_val, 'upd': now_iso, 'id': row_id},
+        )
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({'success': True, 'field': field, 'value': _parse_web_brands(store_val) if field == 'web_brands' else store_val})
     except Exception as e:
+        db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -13431,7 +13966,13 @@ def get_brand_options():
 @app.route('/api/vendor-control/login/<path:row_key>', methods=['GET'])
 def vendor_control_login(row_key):
     try:
-        rows, _ = vendor_control_rows(force=False)
+        from vendor_master_service import load_vendor_master_rows
+        rows, _ = load_vendor_master_rows(
+            db,
+            inject_brand_fn=None,
+            legacy_rows_loader=lambda: vendor_control_rows(force=False),
+            sodata_model=SOData,
+        )
         row = next((item for item in rows if str(item.get('row_key')) == str(row_key)), None)
         if not row:
             return '<h3>Vendor credential was not found or incomplete.</h3>', 404
@@ -14529,8 +15070,9 @@ def get_import_data():
         cache_key = runtime_cache_key('import_data')
         if not force:
             cached = runtime_cache_get_swr(cache_key, request.full_path)
-            if cached is not None:
-                return jsonify(cached)
+            if cached is not None and isinstance(cached, dict):
+                if cached.get('total', 0) > 0 or len(cached.get('data') or []) > 0 or db.session.query(ImportDashboardRow.id).first() is None:
+                    return jsonify(cached)
         page = max(int(request.args.get('page', 1)), 1)
         per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
         search = clean(request.args.get('search')) or ''
@@ -16973,8 +17515,9 @@ def get_all_registered_items():
     try:
         cache_key = runtime_cache_key('all_registered_items')
         cached = runtime_cache_get_swr(cache_key, request.full_path)
-        if cached is not None:
-            return jsonify(cached)
+        if cached is not None and isinstance(cached, dict):
+            if cached.get('total', 0) > 0 or len(cached.get('data') or []) > 0 or db.session.query(ProductIDDB.id).first() is None:
+                return jsonify(cached)
 
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 25))
@@ -17137,7 +17680,7 @@ def get_all_registered_items():
         # V61 PERF: cukup ambil kolom (category_id, category_name) untuk
         # resolve PIC — tidak perlu serialize seluruh row ORM hanya untuk
         # mendapatkan daftar PIC (dulu: O(full table) per request).
-        option_rows = pic_option_q.with_entities(ProductIDDB.category_id, ProductIDDB.category_name).all()
+        option_rows = pic_option_q.with_entities(ProductIDDB.category_id, ProductIDDB.category_name).distinct().all()
         pic_set = set()
         for cat_id_val, cat_name_val in option_rows:
             cid = normalize_category_id(cat_id_val)
@@ -20981,22 +21524,629 @@ def admin_access_ip_block_v632740():
     return jsonify({'success': True, 'ip': ip, 'blocked': blocked})
 
 
-# AI Intelligence stays isolated from purchasing routes and tables. Local desktop
-# sessions may manage providers; hosted deployments still require admin auth.
-def _ai_admin_allowed_v1():
-    if os.environ.get('SERVEONE_DESKTOP_MODE') == '1':
-        return (request.remote_addr or '') in {'127.0.0.1', '::1'}
-    header_ok = bool(_ADMIN_API_KEY_V61 and hmac.compare_digest(
-        request.headers.get('X-Admin-Key', '').strip(), _ADMIN_API_KEY_V61))
-    return header_ok or _admin_session_valid_v632740()
+# ============================================================
+# TO DO LIST — PRIORITY FOLLOW-UP QUEUE (Pending Delivery + Item Registration)
+# Persistent lockable PIC & status checklist + priority ordering stored on disk.
+# ============================================================
+_TODO_LIST_LOCK = threading.Lock()
+_TODO_LIST_PREFS_PATH = os.path.join(os.path.dirname(_DATA_REVISION_PATH), 'todo_list_preferences.json')
+_TODO_BASE_CACHE = {'key': None, 'so_items': None, 'ir_items': None, 'pic_totals': None}
+
+_TODO_DEFAULT_PRIORITY_SO_STATUSES = [
+    'Purchasing Confirm',
+    'S/O Create Complete (SAP)',
+    'PO Received(Vendor)',
+    'Shipping Order(Vendor)',
+    'Approval Apply',
+    'Approval Complete Step',
+    'Approval Hold',
+]
+
+_TODO_DEFAULT_PRIORITY_PROC_STATUSES = [
+    'Quotation in Process',
+    'Bidding Processing',
+    'Receive Purchase',
+    'Sales PIC Confirmation Complete(Pur. PIC)',
+    'Product Register in Process',
+    'Product Registry Request(Assist)',
+    '[Sales-Register Request]Request Process Wait',
+    'DB Verif. in Process',
+]
+
+_TODO_DEFAULT_CLOSED_PROC_STATUSES_LOWER = {
+    '[sales-register request]process complete',
+    'sales pic terminate(db part-db verif.)',
+    'sales pic terminate(pur. pic)',
+    'sales pic terminate(pur pic)',
+    '[sales-register request]exception close',
+    'purchasing process complete',
+    'purchasing process completed',
+    '[sales-register request]approval request cancel',
+}
 
 
-try:
-    from ai_intelligence import init_ai_intelligence
-    init_ai_intelligence(app, db, admin_check=_ai_admin_allowed_v1)
-except Exception as _ai_init_error_v1:
-    # AI failure must never stop existing purchasing and reporting features.
-    print(f'[ai-intelligence] initialization skipped: {_ai_init_error_v1}', flush=True)
+def _todo_load_preferences_raw():
+    with _TODO_LIST_LOCK:
+        try:
+            if os.path.isfile(_TODO_LIST_PREFS_PATH):
+                with io.open(_TODO_LIST_PREFS_PATH, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
+
+
+def _todo_save_preferences_raw(payload):
+    if not isinstance(payload, dict):
+        return {}
+    clean_payload = {
+        'selected_pics': [str(p).strip() for p in (payload.get('selected_pics') or []) if str(p).strip()],
+        'priority_only': bool(payload.get('priority_only', False)),
+        'so_priority_only': bool(payload.get('so_priority_only', payload.get('priority_only', False))),
+        'ir_priority_only': bool(payload.get('ir_priority_only', payload.get('priority_only', False))),
+        'so_sort_by': str(payload.get('so_sort_by') or payload.get('sort_by') or 'priority_oldest').strip().lower(),
+        'ir_sort_by': str(payload.get('ir_sort_by') or payload.get('sort_by') or 'priority_oldest').strip().lower(),
+        'so_statuses': payload.get('so_statuses') if isinstance(payload.get('so_statuses'), dict) else {},
+        'proc_statuses': payload.get('proc_statuses') if isinstance(payload.get('proc_statuses'), dict) else {},
+        'updated_at': datetime.utcnow().isoformat() + 'Z',
+    }
+    for k in ('so_sort_by', 'ir_sort_by'):
+        if clean_payload[k] not in ('priority_oldest', 'oldest', 'newest', 'amount_desc'):
+            clean_payload[k] = 'priority_oldest'
+    with _TODO_LIST_LOCK:
+        try:
+            os.makedirs(os.path.dirname(_TODO_LIST_PREFS_PATH), exist_ok=True)
+            tmp = _TODO_LIST_PREFS_PATH + '.tmp'
+            with io.open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(clean_payload, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, _TODO_LIST_PREFS_PATH)
+        except Exception as exc:
+            print(f'[todo-list] failed to save preferences: {exc}', flush=True)
+    return clean_payload
+
+
+def _todo_merge_status_config(all_statuses_with_counts, saved_map, default_priority_list, default_unchecked_lower=None):
+    default_unchecked_lower = default_unchecked_lower or set()
+    saved_map = saved_map if isinstance(saved_map, dict) else {}
+    default_prio_rank = {name: idx + 1 for idx, name in enumerate(default_priority_list)}
+    items = []
+    for st_name, counts in all_statuses_with_counts.items():
+        saved = saved_map.get(st_name) if isinstance(saved_map.get(st_name), dict) else None
+        st_lower = st_name.strip().lower()
+        is_default_closed = st_lower in default_unchecked_lower
+        if saved is not None:
+            checked = bool(saved.get('checked', not is_default_closed))
+            priority = bool(saved.get('priority', st_name in default_prio_rank))
+            order = int(saved.get('order', default_prio_rank.get(st_name, 999)) or 999)
+        else:
+            checked = not is_default_closed
+            priority = st_name in default_prio_rank
+            order = default_prio_rank.get(st_name, 999)
+        items.append({
+            'status': st_name,
+            'checked': checked,
+            'priority': priority,
+            'order': order,
+            'total_count': int(counts.get('total', 0)),
+            'pic_count': int(counts.get('pic', 0)),
+        })
+    items.sort(key=lambda x: (0 if x['priority'] else 1, x['order'], -x['pic_count'], -x['total_count'], x['status']))
+    prio_idx = 0
+    for idx, item in enumerate(items):
+        item['order'] = idx + 1
+        if item['priority']:
+            prio_idx += 1
+            item['priority_rank'] = prio_idx
+        else:
+            item['priority_rank'] = None
+    return items
+
+
+@app.route('/api/todo-list/preferences', methods=['GET', 'PUT'])
+def todo_list_preferences_endpoint():
+    if request.method == 'PUT':
+        body = request.get_json(silent=True) or {}
+        saved = _todo_save_preferences_raw(body)
+        return jsonify({'status': 'ok', 'preferences': saved})
+    saved = _todo_load_preferences_raw()
+    return jsonify({'status': 'ok', 'preferences': saved})
+
+
+@app.route('/api/todo-list/data', methods=['GET', 'POST'])
+def get_todo_list_data():
+    try:
+        saved_prefs = _todo_load_preferences_raw()
+        body = request.get_json(silent=True) if request.method == 'POST' else None
+        active_cfg = body if isinstance(body, dict) else {}
+
+        # Use query/body overrides if provided, otherwise fall back to saved prefs
+        if 'selected_pics' in active_cfg:
+            selected_pics = [str(p).strip() for p in (active_cfg.get('selected_pics') or []) if str(p).strip()]
+        elif request.args.getlist('pic'):
+            selected_pics = [str(p).strip() for p in request.args.getlist('pic') if str(p).strip()]
+        else:
+            selected_pics = [str(p).strip() for p in (saved_prefs.get('selected_pics') or []) if str(p).strip()]
+
+        if 'so_priority_only' in active_cfg:
+            so_priority_only = bool(active_cfg.get('so_priority_only'))
+        elif 'priority_only' in active_cfg:
+            so_priority_only = bool(active_cfg.get('priority_only'))
+        else:
+            so_priority_only = bool(saved_prefs.get('so_priority_only', saved_prefs.get('priority_only', False)))
+
+        if 'ir_priority_only' in active_cfg:
+            ir_priority_only = bool(active_cfg.get('ir_priority_only'))
+        elif 'priority_only' in active_cfg:
+            ir_priority_only = bool(active_cfg.get('priority_only'))
+        else:
+            ir_priority_only = bool(saved_prefs.get('ir_priority_only', saved_prefs.get('priority_only', False)))
+
+        so_sort_by = str(active_cfg.get('so_sort_by') or active_cfg.get('sort_by') or saved_prefs.get('so_sort_by') or 'priority_oldest').strip().lower()
+        if so_sort_by not in ('priority_oldest', 'oldest', 'newest', 'amount_desc'):
+            so_sort_by = 'priority_oldest'
+
+        ir_sort_by = str(active_cfg.get('ir_sort_by') or active_cfg.get('sort_by') or saved_prefs.get('ir_sort_by') or 'priority_oldest').strip().lower()
+        if ir_sort_by not in ('priority_oldest', 'oldest', 'newest'):
+            ir_sort_by = 'priority_oldest'
+
+        so_search_q = str(active_cfg.get('so_search') if 'so_search' in active_cfg else (active_cfg.get('search') or request.args.get('so_search') or '')).strip().lower()
+        ir_search_q = str(active_cfg.get('ir_search') if 'ir_search' in active_cfg else (active_cfg.get('search') or request.args.get('ir_search') or '')).strip().lower()
+        so_status_filter = str(active_cfg.get('so_status_filter') or request.args.get('so_status_filter') or '').strip()
+        ir_status_filter = str(active_cfg.get('ir_status_filter') or request.args.get('ir_status_filter') or '').strip()
+
+        so_page = max(1, int(active_cfg.get('so_page') or active_cfg.get('page') or request.args.get('so_page') or 1))
+        so_per_page = max(10, min(500, int(active_cfg.get('so_per_page') or active_cfg.get('per_page') or request.args.get('so_per_page') or 25)))
+        ir_page = max(1, int(active_cfg.get('ir_page') or active_cfg.get('page') or request.args.get('ir_page') or 1))
+        ir_per_page = max(10, min(500, int(active_cfg.get('ir_per_page') or active_cfg.get('per_page') or request.args.get('ir_per_page') or 25)))
+
+        so_statuses_cfg = active_cfg.get('so_statuses') if isinstance(active_cfg.get('so_statuses'), dict) else (saved_prefs.get('so_statuses') or {})
+        proc_statuses_cfg = active_cfg.get('proc_statuses') if isinstance(active_cfg.get('proc_statuses'), dict) else (saved_prefs.get('proc_statuses') or {})
+
+        if active_cfg.get('save_prefs'):
+            saved_prefs = _todo_save_preferences_raw({
+                'selected_pics': selected_pics,
+                'priority_only': bool(so_priority_only and ir_priority_only),
+                'so_priority_only': so_priority_only,
+                'ir_priority_only': ir_priority_only,
+                'so_sort_by': so_sort_by,
+                'ir_sort_by': ir_sort_by,
+                'so_statuses': so_statuses_cfg,
+                'proc_statuses': proc_statuses_cfg,
+            })
+
+        today = datetime.now().date()
+        selected_pic_set = {p.upper() for p in selected_pics if p}
+
+        def _pic_matches(row_pic, is_sales_row=False):
+            if not selected_pic_set:
+                return True
+            rp = (row_pic or 'Unassigned').upper()
+            if rp in selected_pic_set:
+                return True
+            if is_sales_row and 'SALES' in selected_pic_set:
+                return True
+            return False
+
+        # 1. Load or reuse cached base Pending Delivery + Item Registration rows
+        base_key = (_RUNTIME_CACHE_VERSION, today.isoformat())
+        with _TODO_LIST_LOCK:
+            cached_base = _TODO_BASE_CACHE if _TODO_BASE_CACHE.get('key') == base_key else None
+
+        if cached_base is not None:
+            base_so_items = cached_base['so_items']
+            base_ir_items = cached_base['ir_items']
+            pic_totals = dict(cached_base['pic_totals'])
+        else:
+            so_fields = (
+                SOData.id, SOData.so_number, SOData.so_item, SOData.so_status,
+                SOData.operation_unit_name, SOData.vendor_name, SOData.manufacturer_name,
+                SOData.customer_po_number, SOData.so_create_date, SOData.delivery_plan_date,
+                SOData.pic_name, SOData.sales_amount, SOData.purchasing_amount,
+                SOData.purchasing_price, SOData.so_qty, SOData.purchasing_currency,
+                SOData.purchasing_amount_idr, SOData.product_id, SOData.product_name,
+                SOData.specification, SOData.matched_po_number, SOData.remarks, SOData.currency,
+            )
+            so_rows = SOData.query.filter(
+                so_countable_sql_filter(),
+                ~SOData.so_status.in_(list(HIDDEN_SO_STATUSES))
+            ).options(load_only(*so_fields)).all()
+
+            pic_totals = {}
+            base_so_items = []
+
+            for r in so_rows:
+                st = clean(r.so_status) or 'Unknown'
+                raw_pic = clean(r.pic_name) or 'Unassigned'
+                is_sales_st = st in SALES_STATUSES
+                effective_pic = 'SALES' if (is_sales_st and raw_pic == 'Unassigned') else raw_pic
+
+                for p_key in ({raw_pic, 'SALES'} if is_sales_st else {raw_pic}):
+                    if p_key:
+                        pic_totals[p_key] = pic_totals.get(p_key, 0) + 1
+
+                create_dt = r.so_create_date
+                age_days = max(0, (today - create_dt).days) if create_dt else 0
+                pur_idr = float(r.purchasing_amount_idr or 0)
+                if pur_idr <= 0:
+                    cur = (clean(r.purchasing_currency) or 'IDR').upper()
+                    raw_pur = float(r.purchasing_amount or 0) or (float(r.purchasing_price or 0) * float(r.so_qty or 0))
+                    if cur in ('', 'IDR'):
+                        pur_idr = raw_pur
+                sales_amt = float(r.sales_amount or 0)
+                amount_idr = pur_idr if pur_idr > 0 else sales_amt
+
+                base_so_items.append({
+                    'uid': f'SO-{r.id}',
+                    'id': r.id,
+                    'source': 'pending_delivery',
+                    'source_label': 'Pending Delivery',
+                    'status': st,
+                    'pic': raw_pic,
+                    'effective_pic': effective_pic,
+                    'is_sales_status': is_sales_st,
+                    'doc_no': f"{clean(r.so_number) or '-'}-{clean(r.so_item) or ''}".rstrip('-'),
+                    'so_number': clean(r.so_number) or '',
+                    'so_item': clean(r.so_item) or '',
+                    'secondary_no': clean(r.matched_po_number) or clean(r.customer_po_number) or '',
+                    'client_or_unit': clean(r.operation_unit_name) or '',
+                    'vendor_or_mfr': clean(r.vendor_name) or clean(r.manufacturer_name) or '',
+                    'product_id': clean_product_id(r.product_id) or '',
+                    'product_name': clean(r.product_name) or '',
+                    'specification': clean(r.specification) or '',
+                    'qty': float(r.so_qty or 0),
+                    'amount_idr': round(amount_idr, 2),
+                    'create_date': create_dt.isoformat() if create_dt else '',
+                    'target_date': r.delivery_plan_date.isoformat() if r.delivery_plan_date else '',
+                    'age_days': age_days,
+                    'remarks': clean(r.remarks) or '',
+                })
+
+            client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+            bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
+            cat_by_id, cat_by_name = master_pic_maps()
+            pic_maps = {'client': client_pic_cache, 'bid_type': bid_type_pic_cache, 'cat_by_id': cat_by_id, 'cat_by_name': cat_by_name}
+
+            ir_rows = ItemRegistration.query.filter(
+                ~item_registration_kpi_status_expr().in_(list(ITEM_REG_HIDDEN_STATUSES))
+            ).all()
+
+            base_ir_items = []
+            for r in ir_rows:
+                st = clean(r.proc_status) or 'Unknown'
+                st_lower = st.lower()
+                resolved_pic = resolve_item_registration_pic(r, maps=pic_maps) or 'Unassigned'
+                is_default_closed = st_lower in _TODO_DEFAULT_CLOSED_PROC_STATUSES_LOWER
+                if not is_default_closed:
+                    pic_totals[resolved_pic] = pic_totals.get(resolved_pic, 0) + 1
+
+                req_dt = r.req_date
+                age_days = max(0, (today - req_dt).days) if req_dt else 0
+
+                base_ir_items.append({
+                    'uid': f'IR-{r.id}',
+                    'id': r.id,
+                    'source': 'item_registration',
+                    'source_label': 'Item Registration',
+                    'status': st,
+                    'pic': resolved_pic,
+                    'effective_pic': resolved_pic,
+                    'is_sales_status': resolved_pic == 'SALES',
+                    'doc_no': clean(r.req_no) or '-',
+                    'so_number': clean(r.req_no) or '',
+                    'so_item': clean(r.stock_no) or '',
+                    'secondary_no': clean_product_id(r.prod_id) or clean(r.stock_no) or '',
+                    'client_or_unit': clean(r.operation_unit_name) or clean(r.client_name) or '',
+                    'vendor_or_mfr': clean(r.mfr_name) or '',
+                    'product_id': clean_product_id(r.prod_id) or '',
+                    'product_name': clean(r.prod_name) or '',
+                    'specification': clean(r.spec) or '',
+                    'qty': 1.0,
+                    'odr_unit': clean(r.odr_unit) or '',
+                    'amount_idr': 0.0,
+                    'create_date': req_dt.isoformat() if req_dt else '',
+                    'target_date': r.registration_date.isoformat() if getattr(r, 'registration_date', None) else '',
+                    'age_days': age_days,
+                    'remarks': clean(r.remarks) or clean(r.existing_owner) or clean(r.category) or '',
+                })
+
+            with _TODO_LIST_LOCK:
+                _TODO_BASE_CACHE['key'] = base_key
+                _TODO_BASE_CACHE['so_items'] = base_so_items
+                _TODO_BASE_CACHE['ir_items'] = base_ir_items
+                _TODO_BASE_CACHE['pic_totals'] = dict(pic_totals)
+
+        so_status_counts = {}
+        raw_so_items = []
+        for base_item in base_so_items:
+            st = base_item['status']
+            sc = so_status_counts.setdefault(st, {'total': 0, 'pic': 0})
+            sc['total'] += 1
+            matched_pic = _pic_matches(base_item['pic'], base_item['is_sales_status'])
+            if matched_pic:
+                sc['pic'] += 1
+            item = dict(base_item)
+            item['matched_pic'] = matched_pic
+            raw_so_items.append(item)
+
+        proc_status_counts = {}
+        raw_ir_items = []
+        for base_item in base_ir_items:
+            st = base_item['status']
+            pc = proc_status_counts.setdefault(st, {'total': 0, 'pic': 0})
+            pc['total'] += 1
+            matched_pic = _pic_matches(base_item['pic'], base_item['is_sales_status'])
+            if matched_pic:
+                pc['pic'] += 1
+            item = dict(base_item)
+            item['matched_pic'] = matched_pic
+            raw_ir_items.append(item)
+
+        # 3. Merge status configurations with priority rank & visibility
+        so_status_list = _todo_merge_status_config(
+            so_status_counts, so_statuses_cfg, _TODO_DEFAULT_PRIORITY_SO_STATUSES
+        )
+        proc_status_list = _todo_merge_status_config(
+            proc_status_counts, proc_statuses_cfg, _TODO_DEFAULT_PRIORITY_PROC_STATUSES,
+            default_unchecked_lower=_TODO_DEFAULT_CLOSED_PROC_STATUSES_LOWER
+        )
+
+        so_cfg_lookup = {x['status']: x for x in so_status_list}
+        proc_cfg_lookup = {x['status']: x for x in proc_status_list}
+
+        # 4. Filter & score Pending Delivery and Item Registration separately
+        filtered_so_items = []
+        filtered_ir_items = []
+        summary = {
+            'total_followup': 0,
+            'priority_followup': 0,
+            'non_priority_followup': 0,
+            'pending_delivery_count': 0,
+            'pending_delivery_priority_count': 0,
+            'pending_delivery_overdue_30': 0,
+            'pending_delivery_amount_idr': 0.0,
+            'item_registration_count': 0,
+            'item_registration_priority_count': 0,
+            'item_registration_overdue_30': 0,
+            'overdue_30_count': 0,
+        }
+        status_breakdown_map = {}
+        pic_live_stats = {}
+
+        def _ensure_pic_stat(p_name):
+            st_obj = pic_live_stats.get(p_name)
+            if st_obj is None:
+                st_obj = {'pic': p_name, 'count': 0, 'so_count': 0, 'ir_count': 0, 'so_amount_idr': 0.0}
+                pic_live_stats[p_name] = st_obj
+            return st_obj
+
+        for known_p in ('SALES', 'DB', 'SARINA', 'SUGI', 'JOKO', 'RIFKA', 'ADIT', 'ANDRE'):
+            _ensure_pic_stat(known_p)
+
+        for item in raw_so_items:
+            st_cfg = so_cfg_lookup.get(item['status'])
+            if not st_cfg or not st_cfg.get('checked'):
+                continue
+            is_prio = bool(st_cfg.get('priority'))
+            if so_priority_only and not is_prio:
+                continue
+
+            # Update global PIC strip stats (reflecting active status/priority selection)
+            for p_key in ({item['pic'], 'SALES'} if item['is_sales_status'] else {item['pic']}):
+                if p_key:
+                    ps = _ensure_pic_stat(p_key)
+                    ps['count'] += 1
+                    ps['so_count'] += 1
+                    ps['so_amount_idr'] = round(ps['so_amount_idr'] + item['amount_idr'], 2)
+
+            if not item['matched_pic']:
+                continue
+            if so_search_q:
+                hay = ' '.join((
+                    item['doc_no'], item['secondary_no'], item['client_or_unit'],
+                    item['vendor_or_mfr'], item['product_id'], item['product_name'],
+                    item['specification'], item['pic'], item['status'], item['remarks']
+                )).lower()
+                if so_search_q not in hay:
+                    continue
+
+            item['is_priority'] = is_prio
+            item['priority_rank'] = st_cfg.get('priority_rank')
+            item['status_order'] = st_cfg.get('order', 999)
+
+            summary['total_followup'] += 1
+            summary['pending_delivery_count'] += 1
+            summary['pending_delivery_amount_idr'] += item['amount_idr']
+            if is_prio:
+                summary['priority_followup'] += 1
+                summary['pending_delivery_priority_count'] += 1
+            else:
+                summary['non_priority_followup'] += 1
+            if item['age_days'] >= 30:
+                summary['overdue_30_count'] += 1
+                summary['pending_delivery_overdue_30'] += 1
+
+            b_key = ('pending_delivery', item['status'])
+            b = status_breakdown_map.get(b_key)
+            if b is None:
+                b = {
+                    'source': 'pending_delivery',
+                    'source_label': 'Pending Delivery',
+                    'status': item['status'],
+                    'priority': is_prio,
+                    'priority_rank': item['priority_rank'],
+                    'status_order': item['status_order'],
+                    'count': 0,
+                    'overdue_30_count': 0,
+                    'max_age_days': 0,
+                    'amount_idr': 0.0,
+                }
+                status_breakdown_map[b_key] = b
+            b['count'] += 1
+            if item['age_days'] >= 30:
+                b['overdue_30_count'] += 1
+            if item['age_days'] > b['max_age_days']:
+                b['max_age_days'] = item['age_days']
+            b['amount_idr'] = round(b['amount_idr'] + item['amount_idr'], 2)
+            filtered_so_items.append(item)
+
+        for item in raw_ir_items:
+            st_cfg = proc_cfg_lookup.get(item['status'])
+            if not st_cfg or not st_cfg.get('checked'):
+                continue
+            is_prio = bool(st_cfg.get('priority'))
+            if ir_priority_only and not is_prio:
+                continue
+
+            p_key = item['pic'] or 'Unassigned'
+            ps = _ensure_pic_stat(p_key)
+            ps['count'] += 1
+            ps['ir_count'] += 1
+
+            if not item['matched_pic']:
+                continue
+            if ir_search_q:
+                hay = ' '.join((
+                    item['doc_no'], item['secondary_no'], item['client_or_unit'],
+                    item['vendor_or_mfr'], item['product_id'], item['product_name'],
+                    item['specification'], item['pic'], item['status'], item['remarks']
+                )).lower()
+                if ir_search_q not in hay:
+                    continue
+
+            item['is_priority'] = is_prio
+            item['priority_rank'] = st_cfg.get('priority_rank')
+            item['status_order'] = st_cfg.get('order', 999)
+
+            summary['total_followup'] += 1
+            summary['item_registration_count'] += 1
+            if is_prio:
+                summary['priority_followup'] += 1
+                summary['item_registration_priority_count'] += 1
+            else:
+                summary['non_priority_followup'] += 1
+            if item['age_days'] >= 30:
+                summary['overdue_30_count'] += 1
+                summary['item_registration_overdue_30'] += 1
+
+            b_key = ('item_registration', item['status'])
+            b = status_breakdown_map.get(b_key)
+            if b is None:
+                b = {
+                    'source': 'item_registration',
+                    'source_label': 'Item Registration',
+                    'status': item['status'],
+                    'priority': is_prio,
+                    'priority_rank': item['priority_rank'],
+                    'status_order': item['status_order'],
+                    'count': 0,
+                    'overdue_30_count': 0,
+                    'max_age_days': 0,
+                    'amount_idr': 0.0,
+                }
+                status_breakdown_map[b_key] = b
+            b['count'] += 1
+            if item['age_days'] >= 30:
+                b['overdue_30_count'] += 1
+            if item['age_days'] > b['max_age_days']:
+                b['max_age_days'] = item['age_days']
+            filtered_ir_items.append(item)
+
+        summary['pending_delivery_amount_idr'] = round(summary['pending_delivery_amount_idr'], 2)
+
+        def _sort_table_items(rows, mode):
+            if mode == 'oldest':
+                rows.sort(key=lambda x: (-x['age_days'], 0 if x['is_priority'] else 1, x['status_order'], x['doc_no']))
+            elif mode == 'newest':
+                rows.sort(key=lambda x: (x['age_days'], 0 if x['is_priority'] else 1, x['status_order'], x['doc_no']))
+            elif mode == 'amount_desc':
+                rows.sort(key=lambda x: (0 if x['is_priority'] else 1, x['status_order'], -x['amount_idr'], -x['age_days']))
+            else:
+                rows.sort(key=lambda x: (
+                    0 if x['is_priority'] else 1,
+                    x['priority_rank'] if x['priority_rank'] is not None else 999,
+                    x['status_order'],
+                    -x['age_days'],
+                    -x['amount_idr'],
+                ))
+
+        _sort_table_items(filtered_so_items, so_sort_by)
+        _sort_table_items(filtered_ir_items, ir_sort_by)
+
+        status_breakdown = sorted(
+            status_breakdown_map.values(),
+            key=lambda x: (
+                0 if x['priority'] else 1,
+                x['priority_rank'] if x['priority_rank'] is not None else 999,
+                x['status_order'],
+                -x['count'],
+            )
+        )
+
+        pic_options = [
+            v for k, v in sorted(pic_live_stats.items(), key=lambda kv: (-kv[1]['count'], kv[0]))
+            if k and k != 'Unassigned'
+        ]
+        if pic_live_stats.get('Unassigned') and pic_live_stats['Unassigned']['count'] > 0:
+            pic_options.append(pic_live_stats['Unassigned'])
+
+        table_so_items = (
+            [x for x in filtered_so_items if x['status'] == so_status_filter]
+            if so_status_filter else filtered_so_items
+        )
+        so_total = len(table_so_items)
+        so_total_pages = max(1, (so_total + so_per_page - 1) // so_per_page)
+        if so_page > so_total_pages:
+            so_page = so_total_pages
+        so_start = (so_page - 1) * so_per_page
+        paged_so_items = table_so_items[so_start:so_start + so_per_page]
+
+        table_ir_items = (
+            [x for x in filtered_ir_items if x['status'] == ir_status_filter]
+            if ir_status_filter else filtered_ir_items
+        )
+        ir_total = len(table_ir_items)
+        ir_total_pages = max(1, (ir_total + ir_per_page - 1) // ir_per_page)
+        if ir_page > ir_total_pages:
+            ir_page = ir_total_pages
+        ir_start = (ir_page - 1) * ir_per_page
+        paged_ir_items = table_ir_items[ir_start:ir_start + ir_per_page]
+
+        return jsonify({
+            'status': 'ok',
+            'summary': summary,
+            'status_breakdown': status_breakdown,
+            'pic_options': pic_options,
+            'so_statuses': so_status_list,
+            'proc_statuses': proc_status_list,
+            'preferences': {
+                'selected_pics': selected_pics,
+                'so_priority_only': so_priority_only,
+                'ir_priority_only': ir_priority_only,
+                'so_sort_by': so_sort_by,
+                'ir_sort_by': ir_sort_by,
+                'updated_at': saved_prefs.get('updated_at'),
+            },
+            'so_table': {
+                'items': paged_so_items,
+                'total': so_total,
+                'page': so_page,
+                'per_page': so_per_page,
+                'total_pages': so_total_pages,
+            },
+            'ir_table': {
+                'items': paged_ir_items,
+                'total': ir_total,
+                'page': ir_page,
+                'per_page': ir_per_page,
+                'total_pages': ir_total_pages,
+            },
+        })
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(exc)}), 500
 
 
 # ============================================================

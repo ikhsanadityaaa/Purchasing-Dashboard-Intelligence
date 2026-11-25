@@ -15,6 +15,11 @@
    via selector di bawah agar tidak dobel; digantikan satu toast kecil terpusat. */
 #z-loading-toast{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;display:none;align-items:center;gap:8px;background:#2563eb;color:#fff;padding:8px 16px;border-radius:9999px;box-shadow:0 6px 20px rgba(0,0,0,.28);font:600 12px/1.3 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;letter-spacing:.01em;pointer-events:none;max-width:280px;white-space:nowrap}
 #z-loading-toast.z-show{display:flex!important} /* Re-enable loading indicator for actual page fetches */
+/* Hilangkan toast biru saat upload manual / ada modal putih aktif */
+body.is-uploading #z-loading-toast,
+#z-loading-toast.z-hide {
+  display: none !important;
+}
 #z-loading-toast .z-spin{width:13px;height:13px;flex:0 0 13px;border-radius:50%;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;animation:z-spin .8s linear infinite}
 @keyframes z-spin{to{transform:rotate(360deg)}}
 /* Sembunyikan loader bawaan aplikasi (V61.1 - digantikan toast terpusat):
@@ -60,7 +65,11 @@ div.fixed.inset-0.bg-black\/50.z-\[9999\]{display:none!important}
   
 <script defer src="/desktop/sheet_sync.js?v=19"></script>
 <link rel="stylesheet" href="/desktop/sheet_sync.css?v=19">
-<script type="module" src="/assets/index-C9BxB1mr.js?v=desktop-28"></script>
+<link rel="stylesheet" href="/desktop/todo_list.css?v=8">
+<script defer src="/desktop/todo_list.js?v=8"></script>
+<link rel="stylesheet" href="/desktop/vendor_control.css?v=3">
+<script defer src="/desktop/vendor_control.js?v=3"></script>
+<script type="module" src="/assets/index-C9BxB1mr.js?v=desktop-34"></script>
 
   
 
@@ -69,13 +78,25 @@ div.fixed.inset-0.bg-black\/50.z-\[9999\]{display:none!important}
 <link rel="stylesheet" href="/desktop/display_controls.css?v=5">
   <link rel="stylesheet" href="/desktop/database_notice.css?v=2">
   <link rel="stylesheet" href="/desktop/reports.css?v=9">
-  <link rel="stylesheet" href="/desktop/ai_intelligence.css?v=9">
 </head>
   <body>
     <div id="root"><div id="z-shell"><div style="width:26px;height:26px;border-radius:50%;border:3px solid #dbeafe;border-top-color:#2563eb;animation:zspin .8s linear infinite"></div></div></div>
     <script>
 (function(){
 'use strict';
+try {
+  // Live mode: bust all stale dashboard/pending settlement caches on initialization
+  for (var _k in localStorage) {
+    if (_k && (_k.indexOf('po-monitoring:dashboard-') === 0 || _k.indexOf('serveone:ps:') === 0)) {
+      localStorage.removeItem(_k);
+    }
+  }
+  for (var _sk in sessionStorage) {
+    if (_sk && (_sk.indexOf('po-monitoring:dashboard-') === 0 || _sk.indexOf('serveone:ps:') === 0)) {
+      sessionStorage.removeItem(_sk);
+    }
+  }
+} catch (e) {}
 /* ════════════════════════════════════════════════════════════════════════
    V61.1 UX FIX #1 - SATU indikator loading kecil di tengah layar.
    Loader bawaan app ("Loading page") disembunyikan via CSS di atas;
@@ -147,37 +168,23 @@ function requestFinished(){
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   V61.5 - UPLOAD DI BACKGROUND: poll status job + pill "Memproses".
-   Backend membalas 202 + job_id untuk upload besar; file diproses worker
-   background sehingga SEMUA halaman tetap cepat selama proses. Helper ini
-   menunggu sampai selesai lalu me-return response final, sehingga alur
-   toast sukses/refetch data di app berjalan persis seperti sebelumnya.
+   V61.5 - UPLOAD DI BACKGROUND: poll status job + white modal.
+   Toast biru (#z-loading-toast) ditekan saat upload manual, hanya dialog
+   modal putih yang ditampilkan (user requirement: hilangkan yang biru, pakai yang putih).
    ════════════════════════════════════════════════════════════════════════ */
 var jobText = null;
 
 window.__jobPill = function (t){
-  if (t){
-    jobText = t;
-    ensureToast();
-    renderText();
-    if (toast){
-      toast.classList.add('z-show');
-      shownAt = Date.now();
-    }
-    if (showTimer){ clearTimeout(showTimer); showTimer = null; }
-    if (hideTimer){ clearTimeout(hideTimer); hideTimer = null; }
-  } else {
-    jobText = null;
-    if (inflight === 0 && toast){
-      renderText();
-      toast.classList.remove('z-show');
-    }
-  }
+  // Suppress blue pill toast: user requested using only the native white modal dialog
+  jobText = null;
+  if (toast) toast.classList.remove('z-show');
 };
 
 window.__uploadJob = async function (axiosInst, url, formData, cfg){
   var res, d;
   try {
+    document.body.classList.add('is-uploading');
+    if (toast) toast.classList.remove('z-show');
     var uploadOptions = Object.assign({}, cfg || {});
     uploadOptions.withCredentials = true;
     uploadOptions.headers = Object.assign({}, uploadOptions.headers || {});
@@ -197,7 +204,17 @@ window.__uploadJob = async function (axiosInst, url, formData, cfg){
     throw e;
   }
   d = res && res.data;
-  if (!(d && d.job_id && d.queued)) return res;   /* bukan job background */
+  if (!(d && d.job_id && d.queued)) {
+    try {
+      for (var k in localStorage) {
+        if (k && k.indexOf('po-monitoring:dashboard-') === 0) localStorage.removeItem(k);
+      }
+      for (var sk in sessionStorage) {
+        if (sk && sk.indexOf('po-monitoring:dashboard-') === 0) sessionStorage.removeItem(sk);
+      }
+    } catch (e) {}
+    return res;   /* bukan job background */
+  }
   var jobId = d.job_id, missing = 0, st;
   if (window.__jobPill) window.__jobPill('Importing Excel into local database\u2026');
   try {
@@ -220,24 +237,28 @@ window.__uploadJob = async function (axiosInst, url, formData, cfg){
         }
         continue;
       }
-      if (st && st.status === 'done') return { data: st.result };
+      if (st && st.status === 'done') {
+        try {
+          for (var k in localStorage) {
+            if (k && k.indexOf('po-monitoring:dashboard-') === 0) localStorage.removeItem(k);
+          }
+          for (var sk in sessionStorage) {
+            if (sk && sk.indexOf('po-monitoring:dashboard-') === 0) sessionStorage.removeItem(sk);
+          }
+        } catch (e) {}
+        return { data: st.result };
+      }
       if (st && st.status === 'error'){
         var err = new Error('Upload failed');
         err.response = { data: (st && st.result) || { error: (st && st.error) || 'Upload failed to process' } };
         throw err;
-      }
-      if (window.__jobPill){
-        window.__jobPill(st && st.status === 'queued'
-          ? 'Waiting for other uploads to finish\u2026'
-          : (st && st.status === 'refreshing'
-              ? 'Refreshing dashboard data\u2026'
-              : 'Importing Excel into local database\u2026'));
       }
     }
     var slow = new Error('Upload is taking too long');
     slow.response = { data: { error: 'Local import is taking too long. Reload the page to check the result.' } };
     throw slow;
   } finally {
+    document.body.classList.remove('is-uploading');
     if (window.__jobPill) window.__jobPill(null);
   }
 };
@@ -253,9 +274,8 @@ if (XO && XO.prototype){
   XO.prototype.send = function(){
     try {
       var u = String(this._zUrl || '');
-      // React Pending Settlement owns its loading state; background requests and
-      // not page loads; do not cover the screen with a global loading toast.
-      this._zTrackLoad = location.pathname.toLowerCase() !== '/ai_intelligence' && !/^(data:|blob:)/i.test(u) && !/\/api\/(data\/pending-settlement(?:-detail)?|upload\/job-status|access\/activity|desktop\/(?:data-revision|status|logs|sheets\/status))(\/|\?|$)/i.test(u);
+      // Exclude uploads and polling so blue toast never overlays the white modal dialog
+      this._zTrackLoad = location.pathname.toLowerCase() !== '/ai_intelligence' && !/^(data:|blob:)/i.test(u) && !/\/api\/(upload(?:\/|$)|data\/pending-settlement(?:-detail)?|access\/activity|desktop\/(?:data-revision|status|logs|sheets\/status))(\/|\?|$)/i.test(u);
       if (this._zTrackLoad) requestStarted();
     } catch (e) { this._zTrackLoad = false; }
     this.addEventListener('loadend', function(){ if (this._zTrackLoad) try { requestFinished(); } catch (e) {} });
@@ -439,6 +459,7 @@ document.addEventListener('click', function(e){
     <script id="z-unified-table-audit">
 (function(){
 'use strict';
+
 /* V63.27.73: shared table styling, event-driven. Only process new tables;
    never rescan every table for each unrelated React class change. */
 var scheduled=false, tableQueue=new Set(), themeDirty=true;
@@ -492,6 +513,7 @@ else start();
 <script>
 (function(){
 'use strict';
+
 /* V63.27.10: Heatmap popup table harmonizer
    Menyamakan popup Pending Delivery & Pending Settlement:
    - body popup punya padding sehingga tabel tidak mepet/terpotong
@@ -749,6 +771,7 @@ if (document.body) {
 <script id="dedupe-page-title-v632769">
 (function(){
 'use strict';
+
 var queued=false,lastPath='';
 function norm(v){return String(v||'').replace(/\s+/g,' ').trim().toLowerCase();}
 function visible(el){
@@ -800,6 +823,7 @@ setTimeout(queue,250);setTimeout(queue,900);setTimeout(queue,1800);
 <script id="vendor-label-v632770">
 (function(){
 'use strict';
+
 function rename(root){
   root=root||document.body;if(!root)return;
   var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);var n;
@@ -817,6 +841,5 @@ new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){for(var j=0;j<ms[
 <script defer src="/desktop/display_controls.js?v=6"></script>
 <script src="/desktop/database_notice.js?v=2" defer></script>
 <script src="/desktop/reports.js?v=8" defer></script>
-<script src="/desktop/ai_intelligence.js?v=6" defer></script>
 </body>
 </html>

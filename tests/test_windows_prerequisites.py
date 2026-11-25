@@ -80,7 +80,8 @@ class WindowsPrerequisiteTests(unittest.TestCase):
         source = (root/'desktop_launcher.py').read_text(encoding='utf-8')
         main = source[source.index('def main():'):]
         self.assertLess(main.index('ensure_gui_requirements()'), main.index('data=user_data_dir()'))
-        self.assertIn('if not (args.worker or args.import_db or args.scheduled_job or args.browser):', source)
+        self.assertIn('if not (args.worker or args.import_db or args.scheduled_job or args.browser or args.self_check):', source)
+        self.assertIn("webview.settings['ALLOW_DOWNLOADS'] = True", source)
 
     def test_installer_includes_offline_payload_and_gates_launch(self):
         root = Path(__file__).resolve().parents[1]
@@ -91,7 +92,8 @@ class WindowsPrerequisiteTests(unittest.TestCase):
         self.assertIn('Check: PrerequisitesOk', iss)
         self.assertIn('if WebView2Installed() then', iss)
         self.assertNotIn('drive.google.com', iss)
-        self.assertIn('UsePreviousAppDir=yes', iss)
+        self.assertIn('UsePreviousAppDir=no', iss)
+        self.assertIn(r'DefaultDirName=D:\ServeoneDashboard\app', iss)
         self.assertIn('Type: filesandordirs; Name: "{app}\\_internal"', iss)
         self.assertIn('Name: autostart;', iss)
         self.assertIn('Name: "{userstartup}\\Serveone Dashboard";', iss)

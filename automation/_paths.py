@@ -40,11 +40,8 @@ def _data_dir() -> Path:
 
     Folder ini selalu writable (tidak seperti Program Files atau _MEIPASS).
     """
-    if os.name == 'nt':
-        base = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
-        data_dir = base / 'ServeoneDashboardDesktop'
-    else:
-        data_dir = Path.home() / '.serveone'
+    from serveone_storage import data_dir as resolve_data_dir
+    data_dir = resolve_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
