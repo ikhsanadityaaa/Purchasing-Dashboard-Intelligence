@@ -53,7 +53,7 @@ class ReactSettlementTests(unittest.TestCase):
         style = CSS.read_text('utf-8')
         index = INDEX.read_text('utf-8')
         self.assertIn('/desktop/pending_settlement_react.css?v=14', index)
-        self.assertIn('/assets/index-C9BxB1mr.js?v=desktop-28', index)
+        self.assertIn('/assets/index-C9BxB1mr.js?v=desktop-34', index)
         for cls in ('.ps-react-dark', '.ps-react-table-scroll', '.ps-react-sticky-left',
                     '.ps-react-modal', '.ps-react-kpis', '.ps-react-skeleton-line',
                     '.ps-react-grand-row'):
@@ -71,8 +71,8 @@ class ReactSettlementTests(unittest.TestCase):
     def test_no_data_or_installer_requirement_changed(self):
         installer = (ROOT/'installer.iss').read_text('utf-8')
         build = (ROOT/'build_windows.bat').read_text('utf-8')
-        self.assertIn('#define MyAppVersion "1.0.1"', installer)
-        self.assertIn('ServeoneDashboard-Setup-V1.0.1', installer)
+        self.assertIn('#define MyAppVersion "1.1.0"', installer)
+        self.assertIn('ServeoneDashboard-Setup-V1.1.0', installer)
         self.assertIn('desktop_launcher.py', build)
         self.assertIn("@('instance','__pycache__')", build)
         self.assertIn("@('.db','.sqlite','.sqlite3','.dpapi')", build)
