@@ -2,7 +2,7 @@
 ; Build: build_windows.bat (includes signed WebView2 Evergreen Standalone x64).
 ; The WebView2 runtime is sourced from Microsoft at BUILD time only.
 #define MyAppName "Serveone Dashboard"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.1.0"
 #define MyAppExeName "ServeoneDashboard.exe"
 #ifnexist "vendor\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
   #error "Missing OFFLINE WebView2 Runtime. Run build_installer_windows.bat."
@@ -14,7 +14,7 @@ AppVersion={#MyAppVersion}
 DefaultDirName=D:\ServeoneDashboard\app
 DefaultGroupName={#MyAppName}
 OutputDir=installer_output
-OutputBaseFilename=ServeoneDashboard-Setup-V1.0.1
+OutputBaseFilename=ServeoneDashboard-Setup-V1.1.0
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=lowest

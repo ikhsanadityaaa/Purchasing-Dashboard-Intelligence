@@ -1087,16 +1087,9 @@
                                   b + ' · Web'
                                 )
                               ),
-                              h(
-                                'button',
-                                {
-                                  type: 'button',
-                                  className: 'vc-mini-btn',
-                                  title: 'Edit / tambah brand internet secara manual',
-                                  onClick: () => setEditing({ id: row.id, field: 'web_brands', value: (row.web_brands || []).join(', ') }),
-                                },
-                                '+ Brand'
-                              )
+                              soBrands.length === 0 && webBrands.length === 0
+                                ? h('span', { style: { color: '#9CA3AF' } }, '-')
+                                : null
                             )
                       ),
                       h(
