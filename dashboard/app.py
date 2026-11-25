@@ -8100,6 +8100,44 @@ def validate_item_registration_source_file(df, filename='Item Registration'):
 
 def import_item_registration_dataframe(df, filename='Item Registration'):
     df.columns = [str(c).strip() for c in df.columns]
+    # Support Process Pur. Info. Reg. sheet as a Bid Except Type enrichment upload
+    marker_cols = {str(c).strip().lower() for c in df.columns}
+    col_probe = _item_registration_columns(df)
+    is_process_bid_type_sheet = (
+        bool(col_probe.get('req_no'))
+        and bool(col_probe.get('bid_except_type'))
+        and ('existing owner.' not in marker_cols)
+        and bool(marker_cols & {'unified vendor', 'bid/quo.', 'bid except type', 'bid/except type', 'multi. bidding required'})
+    )
+    if is_process_bid_type_sheet:
+        req_col = col_probe['req_no']
+        bt_col = col_probe['bid_except_type']
+        bid_map = {}
+        for _, row in df.iterrows():
+            rn = clean(df_val(row, req_col))
+            bt = clean(df_val(row, bt_col))
+            if rn and bt:
+                bid_map[rn] = bt
+        updated = 0
+        if bid_map:
+            keys = list(bid_map.keys())
+            for i in range(0, len(keys), 500):
+                chunk = keys[i:i + 500]
+                for existing in ItemRegistration.query.filter(ItemRegistration.req_no.in_(chunk)).all():
+                    new_bt = bid_map.get(existing.req_no)
+                    if new_bt and (existing.bid_except_type or '').strip() != new_bt:
+                        existing.bid_except_type = new_bt
+                        updated += 1
+        db.session.add(UploadLog(file_type='ITEM_REG_BID_TYPE', filename=filename, records_count=updated))
+        return {
+            'processed': len(bid_map),
+            'added': 0,
+            'updated': updated,
+            'removed_duplicates': 0,
+            'keys': list(bid_map.keys()),
+            'mode': 'bid_type_merge',
+        }
+
     # V60z40: Fix Req. by column mapping.
     # Excel has TWO "Req. by" columns: Q=ID (e.g., "M005485412"), R=Name (e.g., "Yetty Arimbi").
     # Pandas auto-renames duplicate columns to "Req. by.1" (mangle_dupe_cols=True by default).
@@ -8172,8 +8210,8 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
     added = updated = removed_duplicates = 0
     for dup in duplicate_rows:
         db.session.delete(dup); removed_duplicates += 1
-    # V60z36: UPSERT logic — preserve user-edited remarks during update
-    PRESERVE_ON_UPDATE_FIELDS = {'remarks'}
+    # V60z36+: UPSERT logic — preserve user-edited remarks and merged bid_except_type during Prod. Reg. Status updates
+    PRESERVE_ON_UPDATE_FIELDS = {'remarks', 'bid_except_type'}
     for req_no, payload in incoming.items():
         existing = existing_map.get(req_no)
         if existing:
@@ -12406,7 +12444,7 @@ def upload_item_registration():
         # TIDAK hapus req_no lama yang tidak ada di upload baru (stale rows dipertahankan).
         # manual_fields=('remarks',) supaya saat ada duplicate, remarks value dipindahkan
         # ke winner row (tidak hilang).
-        cleanup = cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, manual_fields=('remarks',), preserve_stale_with_manual=False)
+        cleanup = cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, manual_fields=('remarks', 'bid_except_type'), preserve_stale_with_manual=False)
         for key, value in cleanup.items(): summary[key] = summary.get(key, 0) + value
 
         db.session.commit()
@@ -21695,6 +21733,10 @@ def get_todo_list_data():
         ir_search_q = str(active_cfg.get('ir_search') if 'ir_search' in active_cfg else (active_cfg.get('search') or request.args.get('ir_search') or '')).strip().lower()
         so_status_filter = str(active_cfg.get('so_status_filter') or request.args.get('so_status_filter') or '').strip()
         ir_status_filter = str(active_cfg.get('ir_status_filter') or request.args.get('ir_status_filter') or '').strip()
+        so_clients = [clean(x) for x in (active_cfg.get('so_clients') or []) if clean(x)]
+        so_vendors = [clean(x) for x in (active_cfg.get('so_vendors') or []) if clean(x)]
+        ir_clients = [clean(x) for x in (active_cfg.get('ir_clients') or []) if clean(x)]
+        ir_vendors = [clean(x) for x in (active_cfg.get('ir_vendors') or []) if clean(x)]
 
         so_page = max(1, int(active_cfg.get('so_page') or active_cfg.get('page') or request.args.get('so_page') or 1))
         so_per_page = max(10, min(500, int(active_cfg.get('so_per_page') or active_cfg.get('per_page') or request.args.get('so_per_page') or 25)))
@@ -22091,10 +22133,19 @@ def get_todo_list_data():
         if pic_live_stats.get('Unassigned') and pic_live_stats['Unassigned']['count'] > 0:
             pic_options.append(pic_live_stats['Unassigned'])
 
-        table_so_items = (
+        so_status_items = (
             [x for x in filtered_so_items if x['status'] == so_status_filter]
             if so_status_filter else filtered_so_items
         )
+        so_client_options = sorted({x['client_or_unit'] for x in so_status_items if x.get('client_or_unit')})
+        so_vendor_options = sorted({x['vendor_or_mfr'] for x in so_status_items if x.get('vendor_or_mfr')})
+        table_so_items = so_status_items
+        if so_clients:
+            sc_set = {c.lower() for c in so_clients}
+            table_so_items = [x for x in table_so_items if (x.get('client_or_unit') or '').lower() in sc_set]
+        if so_vendors:
+            sv_set = {v.lower() for v in so_vendors}
+            table_so_items = [x for x in table_so_items if (x.get('vendor_or_mfr') or '').lower() in sv_set]
         so_total = len(table_so_items)
         so_total_pages = max(1, (so_total + so_per_page - 1) // so_per_page)
         if so_page > so_total_pages:
@@ -22102,10 +22153,19 @@ def get_todo_list_data():
         so_start = (so_page - 1) * so_per_page
         paged_so_items = table_so_items[so_start:so_start + so_per_page]
 
-        table_ir_items = (
+        ir_status_items = (
             [x for x in filtered_ir_items if x['status'] == ir_status_filter]
             if ir_status_filter else filtered_ir_items
         )
+        ir_client_options = sorted({x['client_or_unit'] for x in ir_status_items if x.get('client_or_unit')})
+        ir_vendor_options = sorted({x['vendor_or_mfr'] for x in ir_status_items if x.get('vendor_or_mfr')})
+        table_ir_items = ir_status_items
+        if ir_clients:
+            ic_set = {c.lower() for c in ir_clients}
+            table_ir_items = [x for x in table_ir_items if (x.get('client_or_unit') or '').lower() in ic_set]
+        if ir_vendors:
+            iv_set = {v.lower() for v in ir_vendors}
+            table_ir_items = [x for x in table_ir_items if (x.get('vendor_or_mfr') or '').lower() in iv_set]
         ir_total = len(table_ir_items)
         ir_total_pages = max(1, (ir_total + ir_per_page - 1) // ir_per_page)
         if ir_page > ir_total_pages:
@@ -22134,6 +22194,8 @@ def get_todo_list_data():
                 'page': so_page,
                 'per_page': so_per_page,
                 'total_pages': so_total_pages,
+                'client_options': so_client_options,
+                'vendor_options': so_vendor_options,
             },
             'ir_table': {
                 'items': paged_ir_items,
@@ -22141,6 +22203,8 @@ def get_todo_list_data():
                 'page': ir_page,
                 'per_page': ir_per_page,
                 'total_pages': ir_total_pages,
+                'client_options': ir_client_options,
+                'vendor_options': ir_vendor_options,
             },
         })
     except Exception as exc:

@@ -69,7 +69,9 @@
 
 .tdl-summary-card.is-active {
   background-color: #FFFBEB;
-  border: 2px solid #F59E0B;
+  border-color: #F59E0B;
+  outline: 1px solid #F59E0B;
+  outline-offset: -1px;
 }
 
 .tdl-page.is-dark .tdl-summary-card {
@@ -84,7 +86,9 @@
 
 .tdl-page.is-dark .tdl-summary-card.is-active {
   background-color: rgba(120, 53, 15, 0.35);
-  border: 2px solid #F59E0B;
+  border-color: #F59E0B;
+  outline: 1px solid #F59E0B;
+  outline-offset: -1px;
 }
 
 .tdl-summary-label {
@@ -293,9 +297,15 @@
   box-shadow: none !important;
 }
 
+.tdl-status-card:active {
+  transform: scale(0.99);
+}
+
 .tdl-status-card.is-active {
   background-color: #FFFBEB;
-  border: 2px solid #F59E0B;
+  border-color: #F59E0B;
+  outline: 1px solid #F59E0B;
+  outline-offset: -1px;
 }
 
 .tdl-page.is-dark .tdl-status-card {
@@ -323,7 +333,51 @@
 
 .tdl-page.is-dark .tdl-status-card.is-active {
   background-color: rgba(120, 53, 15, 0.35);
-  border: 2px solid #F59E0B;
+  border-color: #F59E0B;
+  outline: 1px solid #F59E0B;
+  outline-offset: -1px;
+}
+
+/* True Smooth CSS Grid Accordion Expand & Collapse (glides height + opacity) */
+.tdl-accordion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 0fr;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tdl-accordion.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.tdl-accordion-inner {
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+.tdl-accordion.is-settled .tdl-accordion-inner {
+  overflow: visible;
+}
+
+.tdl-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  transition: opacity 0.22s ease;
+}
+
+.tdl-table-wrap.is-loading {
+  opacity: 0.55;
 }
 
 .tdl-rank-chip.is-all {

@@ -363,20 +363,79 @@
     // Independent table search, page, perPage, and dropdown open states
     const [soSearchDraft, setSoSearchDraft] = React.useState('');
     const [soSearch, setSoSearch] = React.useState('');
+    const [soClients, setSoClients] = React.useState([]);
+    const [soVendors, setSoVendors] = React.useState([]);
     const [soPage, setSoPage] = React.useState(1);
     const [soPerPage, setSoPerPage] = React.useState(25);
 
     const [irSearchDraft, setIrSearchDraft] = React.useState('');
     const [irSearch, setIrSearch] = React.useState('');
+    const [irClients, setIrClients] = React.useState([]);
+    const [irVendors, setIrVendors] = React.useState([]);
     const [irPage, setIrPage] = React.useState(1);
     const [irPerPage, setIrPerPage] = React.useState(25);
+    const [multiFilterSearch, setMultiFilterSearch] = React.useState('');
 
-    // Popover / drawer / active status card / column resize / toast states
+    // Popover / drawer / active status card / smooth accordion / column resize / toast states
     const [openPopover, setOpenPopover] = React.useState(null);
     const [soFilterDrawerOpen, setSoFilterDrawerOpen] = React.useState(false);
     const [irFilterDrawerOpen, setIrFilterDrawerOpen] = React.useState(false);
     const [activeSoCard, setActiveSoCard] = React.useState(null); // null | '__ALL__' | status string
     const [activeIrCard, setActiveIrCard] = React.useState(null); // null | '__ALL__' | status string
+    const [soMountedCard, setSoMountedCard] = React.useState(null);
+    const [soExpanded, setSoExpanded] = React.useState(false);
+    const [soSettled, setSoSettled] = React.useState(false);
+    const [irMountedCard, setIrMountedCard] = React.useState(null);
+    const [irExpanded, setIrExpanded] = React.useState(false);
+    const [irSettled, setIrSettled] = React.useState(false);
+
+    // Smooth accordion mount/unmount lifecycle for Pending Delivery table
+    React.useEffect(() => {
+      if (activeSoCard) {
+        setSoMountedCard(activeSoCard);
+        setSoSettled(false);
+        let settleTimer = null;
+        const raf = window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            setSoExpanded(true);
+            settleTimer = window.setTimeout(() => setSoSettled(true), 430);
+          });
+        });
+        return () => {
+          window.cancelAnimationFrame(raf);
+          if (settleTimer) window.clearTimeout(settleTimer);
+        };
+      } else {
+        setSoSettled(false);
+        setSoExpanded(false);
+        const t = window.setTimeout(() => setSoMountedCard(null), 430);
+        return () => window.clearTimeout(t);
+      }
+    }, [activeSoCard]);
+
+    // Smooth accordion mount/unmount lifecycle for Item Registration table
+    React.useEffect(() => {
+      if (activeIrCard) {
+        setIrMountedCard(activeIrCard);
+        setIrSettled(false);
+        let settleTimer = null;
+        const raf = window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            setIrExpanded(true);
+            settleTimer = window.setTimeout(() => setIrSettled(true), 430);
+          });
+        });
+        return () => {
+          window.cancelAnimationFrame(raf);
+          if (settleTimer) window.clearTimeout(settleTimer);
+        };
+      } else {
+        setIrSettled(false);
+        setIrExpanded(false);
+        const t = window.setTimeout(() => setIrMountedCard(null), 430);
+        return () => window.clearTimeout(t);
+      }
+    }, [activeIrCard]);
     const [colWidths, setColWidths] = React.useState(() => loadColWidths());
     const resizingRef = React.useRef(false);
     const [dragInfo, setDragInfo] = React.useState(null); // { kind: 'so'|'proc', status: string } | null
@@ -538,6 +597,10 @@
             proc_statuses: procStatusesMap,
             so_search: soSearch,
             ir_search: irSearch,
+            so_clients: soClients,
+            so_vendors: soVendors,
+            ir_clients: irClients,
+            ir_vendors: irVendors,
             so_status_filter: activeSoCard && activeSoCard !== '__ALL__' ? activeSoCard : '',
             ir_status_filter: activeIrCard && activeIrCard !== '__ALL__' ? activeIrCard : '',
             so_page: soPage,
@@ -568,6 +631,10 @@
       procStatusesMap,
       soSearch,
       irSearch,
+      soClients,
+      soVendors,
+      irClients,
+      irVendors,
       activeSoCard,
       activeIrCard,
       soPage,
@@ -1158,6 +1225,101 @@
       );
     };
 
+    const renderTableMultiFilterPopover = (popKey, label, options, selected, setSelected, kind) => {
+      const isOpen = openPopover === popKey;
+      const list = Array.isArray(options) ? options : [];
+      const q = multiFilterSearch.trim().toLowerCase();
+      const filtered = q ? list.filter((x) => x.toLowerCase().includes(q)) : list;
+      const shown = filtered.slice(0, 120);
+      const toggleVal = (val) => {
+        if (kind === 'so') setSoPage(1);
+        else setIrPage(1);
+        setSelected((prev) => (prev.includes(val) ? prev.filter((x) => x !== val) : [...prev, val]));
+      };
+      return h(
+        'div',
+        { className: 'tdl-dropdown-anchor' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'tdl-tool-btn' + (isOpen || selected.length > 0 ? ' is-active' : ''),
+            'aria-expanded': isOpen,
+            onClick: () => {
+              setMultiFilterSearch('');
+              setOpenPopover(isOpen ? null : popKey);
+            },
+          },
+          ICON_FILTER(h),
+          h('span', null, label),
+          selected.length > 0 ? h('span', { className: 'tdl-count-pill' }, selected.length) : null,
+          ICON_CHEVRON(h)
+        ),
+        isOpen
+          ? h(
+              React.Fragment,
+              null,
+              h('div', { className: 'tdl-popover-backdrop', onClick: () => setOpenPopover(null) }),
+              h(
+                'div',
+                { className: 'tdl-popover is-narrow', role: 'dialog', 'aria-label': 'Filter ' + label },
+                h(
+                  'div',
+                  { className: 'tdl-popover-head', style: { flexDirection: 'column', alignItems: 'stretch', gap: '0.375rem' } },
+                  h('input', {
+                    type: 'search',
+                    className: 'tdl-input',
+                    style: { width: '100%', height: '32px' },
+                    placeholder: 'Cari ' + label + '...',
+                    value: multiFilterSearch,
+                    autoFocus: true,
+                    onChange: (e) => setMultiFilterSearch(e.target.value),
+                  }),
+                  h(
+                    'div',
+                    { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.6875rem' } },
+                    h('span', null, selected.length + ' dipilih dari ' + fmtInt(list.length)),
+                    selected.length > 0
+                      ? h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'tdl-mini-btn',
+                            onClick: () => {
+                              if (kind === 'so') setSoPage(1);
+                              else setIrPage(1);
+                              setSelected([]);
+                            },
+                          },
+                          'Clear'
+                        )
+                      : null
+                  )
+                ),
+                h(
+                  'div',
+                  { className: 'tdl-popover-list', style: { maxHeight: '240px' } },
+                  shown.length === 0
+                    ? h('div', { style: { padding: '0.75rem', fontSize: '0.75rem', textAlign: 'center', color: '#6B7280' } }, 'Tidak ada opsi cocok')
+                    : shown.map((opt) =>
+                        h(
+                          'label',
+                          { key: opt, className: 'tdl-popover-row tdl-clickable', style: { justifyContent: 'flex-start', gap: '0.5rem' } },
+                          h('input', {
+                            type: 'checkbox',
+                            checked: selected.includes(opt),
+                            onChange: () => toggleVal(opt),
+                          }),
+                          h('span', { style: { wordBreak: 'break-word', fontWeight: 500 } }, opt)
+                        )
+                      )
+                )
+              )
+            )
+          : null
+      );
+    };
+
     const renderSearchDropdownPopover = (kind, draftVal, setDraftVal, appliedVal, setAppliedVal, placeholder) => {
       const popKey = kind + '-search';
       const isOpen = openPopover === popKey;
@@ -1620,75 +1782,109 @@
                 ')'
             )
           ),
-          activeSoCard
-            ? h(
-                'div',
-                { className: 'tdl-card-actions' },
-                renderSearchDropdownPopover(
-                  'so',
-                  soSearchDraft,
-                  setSoSearchDraft,
-                  soSearch,
-                  setSoSearch,
-                  'SO No., PO No., Produk, Vendor...'
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'tdl-tool-btn is-primary-blue',
-                    disabled: !soTable.items.length,
-                    onClick: () => handleExportTableCsv('so'),
-                  },
-                  ICON_DOWNLOAD(h),
-                  h('span', null, 'Download Excel')
-                )
-              )
-            : null
         ),
         renderStatusCards('so', soStatusCards, activeSoCard),
-        activeSoCard
-          ? h(
-              'div',
-              { className: 'tdl-active-table-bar' },
-              h(
-                'span',
-                null,
-                'Menampilkan: ' +
-                  (activeSoCard === '__ALL__' ? 'Show All Pending Delivery' : activeSoCard) +
-                  ' (' +
-                  fmtInt(soTable.total) +
-                  ' records)'
-              ),
-              h(
-                'div',
-                { style: { display: 'inline-flex', alignItems: 'center', gap: '0.5rem' } },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'tdl-mini-btn',
-                    onClick: () => resetColWidths('so'),
-                    title: 'Kembalikan lebar kolom default',
-                  },
-                  'Reset Lebar Kolom'
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'tdl-mini-btn',
-                    onClick: () => setActiveSoCard(null),
-                  },
-                  'Tutup Tabel'
-                )
-              )
-            )
-          : null,
-        activeSoCard
-          ? h(
-              'div',
-              { ref: soTableWrapRef, className: 'tdl-table-wrap' },
+        h(
+          'div',
+          { className: 'tdl-accordion' + (soExpanded ? ' is-open' : '') + (soSettled ? ' is-settled' : '') },
+          h(
+            'div',
+            { className: 'tdl-accordion-inner' },
+            soMountedCard
+              ? h(
+                  React.Fragment,
+                  null,
+                  h(
+                    'div',
+                    { className: 'tdl-active-table-bar' },
+                    h(
+                      'span',
+                      null,
+                      'Menampilkan: ' +
+                        (soMountedCard === '__ALL__' ? 'Show All Pending Delivery' : soMountedCard) +
+                        ' (' +
+                        fmtInt(soTable.total) +
+                        ' records)'
+                    ),
+                    h(
+                      'div',
+                      { style: { display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' } },
+                      soClients.length > 0 || soVendors.length > 0 || soSearch
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'tdl-mini-btn',
+                              onClick: () => {
+                                setSoClients([]);
+                                setSoVendors([]);
+                                setSoSearchDraft('');
+                                setSoSearch('');
+                                setSoPage(1);
+                              },
+                            },
+                            'Reset Filter'
+                          )
+                        : null,
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'tdl-mini-btn',
+                          onClick: () => resetColWidths('so'),
+                          title: 'Kembalikan lebar kolom default',
+                        },
+                        'Reset Lebar Kolom'
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'tdl-mini-btn',
+                          onClick: () => setActiveSoCard(null),
+                        },
+                        'Tutup Tabel'
+                      ),
+                      renderSearchDropdownPopover(
+                        'so',
+                        soSearchDraft,
+                        setSoSearchDraft,
+                        soSearch,
+                        setSoSearch,
+                        'SO No., PO No., Produk, Vendor...'
+                      ),
+                      renderTableMultiFilterPopover(
+                        'so-client',
+                        'Client',
+                        soTable.client_options || [],
+                        soClients,
+                        setSoClients,
+                        'so'
+                      ),
+                      renderTableMultiFilterPopover(
+                        'so-vendor',
+                        'Vendor',
+                        soTable.vendor_options || [],
+                        soVendors,
+                        setSoVendors,
+                        'so'
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'tdl-tool-btn is-primary-blue',
+                          disabled: !soTable.items.length,
+                          onClick: () => handleExportTableCsv('so'),
+                        },
+                        ICON_DOWNLOAD(h),
+                        h('span', null, 'Download Excel')
+                      )
+                    )
+                  ),
+                  h(
+                    'div',
+                    { ref: soTableWrapRef, className: 'tdl-table-wrap' + (loading ? ' is-loading' : '') },
               h(
                 'table',
                 { className: 'tdl-table is-resizable' },
@@ -1821,9 +2017,12 @@
                   })
             )
           )
+        ),
+        renderPager('so', soTable, soPage, setSoPage, soPerPage, setSoPerPage)
+                )
+              : null
+          )
         )
-          : null,
-        activeSoCard ? renderPager('so', soTable, soPage, setSoPage, soPerPage, setSoPerPage) : null
       ),
 
       // 3. TABLE 2: Item Registration Follow-Up
@@ -1848,75 +2047,109 @@
                 ' prioritas)'
             )
           ),
-          activeIrCard
-            ? h(
-                'div',
-                { className: 'tdl-card-actions' },
-                renderSearchDropdownPopover(
-                  'ir',
-                  irSearchDraft,
-                  setIrSearchDraft,
-                  irSearch,
-                  setIrSearch,
-                  'Req. No., Stock No., Produk, Manufacturer...'
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'tdl-tool-btn is-primary-blue',
-                    disabled: !irTable.items.length,
-                    onClick: () => handleExportTableCsv('ir'),
-                  },
-                  ICON_DOWNLOAD(h),
-                  h('span', null, 'Download Excel')
-                )
-              )
-            : null
         ),
         renderStatusCards('ir', irStatusCards, activeIrCard),
-        activeIrCard
-          ? h(
-              'div',
-              { className: 'tdl-active-table-bar' },
-              h(
-                'span',
-                null,
-                'Menampilkan: ' +
-                  (activeIrCard === '__ALL__' ? 'Show All Item Registration' : activeIrCard) +
-                  ' (' +
-                  fmtInt(irTable.total) +
-                  ' records)'
-              ),
-              h(
-                'div',
-                { style: { display: 'inline-flex', alignItems: 'center', gap: '0.5rem' } },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'tdl-mini-btn',
-                    onClick: () => resetColWidths('ir'),
-                    title: 'Kembalikan lebar kolom default',
-                  },
-                  'Reset Lebar Kolom'
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'tdl-mini-btn',
-                    onClick: () => setActiveIrCard(null),
-                  },
-                  'Tutup Tabel'
-                )
-              )
-            )
-          : null,
-        activeIrCard
-          ? h(
-              'div',
-              { ref: irTableWrapRef, className: 'tdl-table-wrap' },
+        h(
+          'div',
+          { className: 'tdl-accordion' + (irExpanded ? ' is-open' : '') + (irSettled ? ' is-settled' : '') },
+          h(
+            'div',
+            { className: 'tdl-accordion-inner' },
+            irMountedCard
+              ? h(
+                  React.Fragment,
+                  null,
+                  h(
+                    'div',
+                    { className: 'tdl-active-table-bar' },
+                    h(
+                      'span',
+                      null,
+                      'Menampilkan: ' +
+                        (irMountedCard === '__ALL__' ? 'Show All Item Registration' : irMountedCard) +
+                        ' (' +
+                        fmtInt(irTable.total) +
+                        ' records)'
+                    ),
+                    h(
+                      'div',
+                      { style: { display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' } },
+                      irClients.length > 0 || irVendors.length > 0 || irSearch
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'tdl-mini-btn',
+                              onClick: () => {
+                                setIrClients([]);
+                                setIrVendors([]);
+                                setIrSearchDraft('');
+                                setIrSearch('');
+                                setIrPage(1);
+                              },
+                            },
+                            'Reset Filter'
+                          )
+                        : null,
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'tdl-mini-btn',
+                          onClick: () => resetColWidths('ir'),
+                          title: 'Kembalikan lebar kolom default',
+                        },
+                        'Reset Lebar Kolom'
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'tdl-mini-btn',
+                          onClick: () => setActiveIrCard(null),
+                        },
+                        'Tutup Tabel'
+                      ),
+                      renderSearchDropdownPopover(
+                        'ir',
+                        irSearchDraft,
+                        setIrSearchDraft,
+                        irSearch,
+                        setIrSearch,
+                        'Req. No., Stock No., Produk, Manufacturer...'
+                      ),
+                      renderTableMultiFilterPopover(
+                        'ir-client',
+                        'Client',
+                        irTable.client_options || [],
+                        irClients,
+                        setIrClients,
+                        'ir'
+                      ),
+                      renderTableMultiFilterPopover(
+                        'ir-vendor',
+                        'Vendor / Mfr.',
+                        irTable.vendor_options || [],
+                        irVendors,
+                        setIrVendors,
+                        'ir'
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'tdl-tool-btn is-primary-blue',
+                          disabled: !irTable.items.length,
+                          onClick: () => handleExportTableCsv('ir'),
+                        },
+                        ICON_DOWNLOAD(h),
+                        h('span', null, 'Download Excel')
+                      )
+                    )
+                  ),
+                  h(
+                    'div',
+                    { ref: irTableWrapRef, className: 'tdl-table-wrap' + (loading ? ' is-loading' : '') },
               h(
                 'table',
                 { className: 'tdl-table is-resizable' },
@@ -2043,9 +2276,12 @@
                   })
             )
           )
+        ),
+        renderPager('ir', irTable, irPage, setIrPage, irPerPage, setIrPerPage)
+                )
+              : null
+          )
         )
-          : null,
-        activeIrCard ? renderPager('ir', irTable, irPage, setIrPage, irPerPage, setIrPerPage) : null
       ),
       toastMsg ? h('div', { className: 'tdl-toast', role: 'status', 'aria-live': 'polite' }, toastMsg) : null
     );

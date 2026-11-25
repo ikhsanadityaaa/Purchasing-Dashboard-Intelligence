@@ -353,17 +353,72 @@ def _sanitize_excel_com_registration():
         logging.debug(f"Sanitize Excel COM failed: {e}")
 
 
+def _pids_with_visible_windows() -> set:
+    """Return PIDs that own at least one visible top-level window with a non-empty title."""
+    visible_pids = set()
+    try:
+        user32 = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        buf = ctypes.create_unicode_buffer(256)
+
+        def _cb(hwnd, _):
+            try:
+                if user32.IsWindowVisible(hwnd) and user32.GetWindowTextW(hwnd, buf, 256) > 0:
+                    pid = ctypes.c_ulong()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    if pid.value:
+                        visible_pids.add(int(pid.value))
+            except Exception:
+                pass
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+    except Exception:
+        pass
+    return visible_pids
+
+
+def _cleanup_stale_sap_excel_temp_files():
+    """Remove stale ZMM_MATNR_LIST* or ~$ProductID* lock/temp files that can cause
+    SAP DOWNLOAD_WEB_OBJECT error 'Excel file ZMM_MATNR_LIST_EN cannot be processed'."""
+    dirs = [
+        Path(os.environ.get('TEMP', '')) if os.environ.get('TEMP') else None,
+        Path.home() / 'Documents' / 'SAP' / 'SAP GUI',
+        Path.home() / 'AppData' / 'Local' / 'SAP' / 'SAP GUI' / 'tmp',
+        CONFIG['DOWNLOAD_DIR'],
+    ]
+    removed = 0
+    for d in dirs:
+        if not d or not d.exists():
+            continue
+        for pat in ('*ZMM_MATNR_LIST*', '~$ProductID*', '~$*.xls*'):
+            try:
+                for p in d.glob(pat):
+                    if p.is_file():
+                        try:
+                            p.unlink()
+                            removed += 1
+                        except OSError:
+                            pass
+            except Exception:
+                pass
+    if removed:
+        logging.info(f"  Bersihkan {removed} file temp/lock Excel SAP lama (ZMM_MATNR_LIST)")
+
+
 def force_close_all_excel():
-    """Tutup Excel yang muncul selama run; pertahankan Excel milik user."""
+    """Tutup Excel automation/headless dan Excel yang muncul selama run; pertahankan Excel interaktif milik user."""
     _sanitize_excel_com_registration()
     closed = 0
     for proc in psutil.process_iter(['name', 'pid', 'cmdline']):
         try:
             name = (proc.info['name'] or '').lower()
+            cmdline = ' '.join(proc.info.get('cmdline') or []).lower()
+            is_ole_automation = ('/automation' in cmdline) or ('-embedding' in cmdline)
             if 'excel' in name:
-                if proc.info['pid'] in _SERP_PRESERVE_EXCEL_PIDS:
+                if (proc.info['pid'] in _SERP_PRESERVE_EXCEL_PIDS) and not is_ole_automation:
                     continue
-                logging.info(f"  Menutup Excel PID {proc.info['pid']}...")
+                logging.info(f"  Menutup Excel PID {proc.info['pid']}{' (automation)' if is_ole_automation else ''}...")
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
@@ -371,8 +426,7 @@ def force_close_all_excel():
                     proc.kill()
                 closed += 1
             elif 'et.exe' in name or 'wps.exe' in name:
-                cmdline = ' '.join(proc.info.get('cmdline') or []).lower()
-                if '/automation' in cmdline or '-embedding' in cmdline:
+                if is_ole_automation:
                     proc.terminate()
                     closed += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -382,6 +436,7 @@ def force_close_all_excel():
         time.sleep(2)
     else:
         logging.info("  Tidak ada Excel yang terbuka.")
+    _cleanup_stale_sap_excel_temp_files()
 
 
 # ── WebDriver (Selenium) ──────────────────────────────────────────────────────
@@ -3670,7 +3725,7 @@ class SapGuiAutomation:
 
         return False
 
-    def handle_save_dialog(self, filename: str) -> Path:
+    def handle_save_dialog(self, filename: str, prefer_default_sap_dir: bool = False) -> Path:
         """
         Tangani dialog simpan file setelah Execute.
 
@@ -3684,7 +3739,13 @@ class SapGuiAutomation:
         3. Konfirmasi overwrite jika ada
         4. Minimize SAP setelah semua selesai
         """
-        save_path = str(CONFIG['DOWNLOAD_DIR'] / filename)
+        if prefer_default_sap_dir:
+            sap_default_dir = Path.home() / 'Documents' / 'SAP' / 'SAP GUI'
+            sap_default_dir.mkdir(parents=True, exist_ok=True)
+            save_path = str(sap_default_dir / filename)
+        else:
+            CONFIG['DOWNLOAD_DIR'].mkdir(parents=True, exist_ok=True)
+            save_path = str(CONFIG['DOWNLOAD_DIR'] / filename)
         logging.info(f"  Menunggu dialog Save setelah Execute → {save_path}")
 
         # FIX V20: guard dipanggil SELAMA menunggu dialog Save (60 detik).
@@ -4013,18 +4074,43 @@ def navigate_and_download_via_sap_gui() -> Path:
         save_debug_screenshot("sap_window_not_found")
         return None
 
-    if not sap.enter_transaction(CONFIG['SAP_TCODE']):
-        return None
+    result = None
+    for export_attempt in (1, 2):
+        attempt_filename = (
+            filename if export_attempt == 1
+            else f"{CONFIG['FILENAME_PREFIX']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xls"
+        )
+        if export_attempt > 1:
+            logging.warning(
+                "  Retry ZMMR3190 export (percobaan 2/2, bersihkan Excel automation & pakai default SAP GUI dir)..."
+            )
+            force_close_all_excel()
+            time.sleep(2)
 
-    force_close_all_excel()
+        if not sap.enter_transaction(CONFIG['SAP_TCODE']):
+            if export_attempt == 1:
+                continue
+            return None
 
-    if not sap.fill_register_date(date_from_str, date_to_str):
-        return None
+        force_close_all_excel()
 
-    if not sap.execute():
-        return None
+        if not sap.fill_register_date(date_from_str, date_to_str):
+            if export_attempt == 1:
+                continue
+            return None
 
-    result = sap.handle_save_dialog(filename)
+        if not sap.execute():
+            if export_attempt == 1:
+                continue
+            return None
+
+        result = sap.handle_save_dialog(
+            attempt_filename,
+            prefer_default_sap_dir=(export_attempt > 1),
+        )
+        if result:
+            break
+
     if not result:
         logging.error("  File tidak berhasil disimpan")
         save_debug_screenshot("sap_download_failed")
@@ -4338,16 +4424,40 @@ def _run_automation_once() -> bool:
     logging.info("=" * 70)
 
     global _SERP_PRESERVE_EXCEL_PIDS, _SERP_PRESERVE_SAP_PIDS
-    _SERP_PRESERVE_EXCEL_PIDS = _process_pids_containing('excel')
-    _SERP_PRESERVE_SAP_PIDS = _process_pids_containing('sap')
-    # Bersihkan sisa proses SAP zombie sebelum mulai
+    visible_pids = _pids_with_visible_windows()
+    _SERP_PRESERVE_EXCEL_PIDS = set()
+    for proc in psutil.process_iter(['name', 'pid', 'cmdline']):
+        try:
+            name = (proc.info['name'] or '').lower()
+            if 'excel' in name:
+                cmdline = ' '.join(proc.info.get('cmdline') or []).lower()
+                if ('/automation' not in cmdline) and ('-embedding' not in cmdline):
+                    _SERP_PRESERVE_EXCEL_PIDS.add(proc.info['pid'])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # Hanya pertahankan proses SAP yang benar-benar punya window terlihat (sedang dipakai user).
+    # Proses saplogon.exe/sapgui.exe zombie tanpa window (headless/stale) dibersihkan
+    # agar SSO tx.sap tidak gagal attach COM ('SAP session tidak siap dalam 45 detik').
+    all_sap_pids = _process_pids_containing('sap')
+    _SERP_PRESERVE_SAP_PIDS = {pid for pid in all_sap_pids if pid in visible_pids}
+    zombie_sap_closed = 0
     for proc in psutil.process_iter(['name', 'pid']):
         try:
             if (proc.info['name'] or '').lower() in {'saplogon.exe', 'sapgui.exe', 'saplgpad.exe', 'sapshcut.exe'}:
                 if proc.info['pid'] not in _SERP_PRESERVE_SAP_PIDS:
+                    logging.info(f"  Membersihkan proses SAP zombie tanpa window: {proc.info['name']} (PID {proc.info['pid']})")
                     proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                    zombie_sap_closed += 1
         except Exception:
             pass
+    if zombie_sap_closed:
+        time.sleep(1.5)
+    _cleanup_stale_sap_excel_temp_files()
     try:
         run_start_names = {p.name for p in CONFIG['DOWNLOAD_DIR'].iterdir() if p.is_file()}
     except Exception:
