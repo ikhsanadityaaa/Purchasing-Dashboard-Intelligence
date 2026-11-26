@@ -2716,6 +2716,7 @@ class ItemRegistration(db.Model):
     pic = db.Column(db.String(200))
     pic_name = db.Column(db.String(200))
     req_no = db.Column(db.String(100), index=True)
+    origin_nm = db.Column(db.String(120))
     prod_id = db.Column(db.String(100), index=True)
     product_status = db.Column(db.String(100))
     prod_name = db.Column(db.Text)
@@ -3819,7 +3820,7 @@ def _ensure_extra_columns():
         # Existing rows stay intact; new nullable columns are populated on later imports.
         'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(200)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('remarks', 'TEXT'), ('vendor_id', 'VARCHAR(100)'), ('updated_at', 'TIMESTAMP'),
             # V60z37: New fields from Prod. Reg. Status sheet
-            ('req_owner', 'VARCHAR(200)'), ('req_by', 'VARCHAR(300)'), ('sales_pic_name', 'VARCHAR(300)'), ('pre_reg_recomm_id', 'VARCHAR(100)'), ('stock_no', 'VARCHAR(100)'),
+            ('req_owner', 'VARCHAR(200)'), ('req_by', 'VARCHAR(300)'), ('sales_pic_name', 'VARCHAR(300)'), ('pre_reg_recomm_id', 'VARCHAR(100)'), ('stock_no', 'VARCHAR(100)'), ('origin_nm', 'VARCHAR(120)'),
         ],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE')],
         'import_vendor': [('origin', 'VARCHAR(100)'), ('top', 'VARCHAR(50)'), ('non_ski', 'VARCHAR(50)'), ('brand_handling', 'TEXT')],
@@ -7749,7 +7750,7 @@ def item_registration_dict(row, registered_items=None, include_similarity=True, 
         'operation_unit_name': row.operation_unit_name or '',
         'category': source_category_level1(row.category),
         'category_id': getattr(row, 'category_id', '') or '',
-        'pic': pic, 'req_no': row.req_no or '', 'prod_id': row.prod_id or '',
+        'pic': pic, 'req_no': row.req_no or '', 'origin_nm': getattr(row, 'origin_nm', '') or '', 'prod_id': row.prod_id or '',
         'prod_name': row.prod_name or '', 'spec': row.spec or '', 'mfr_name': row.mfr_name or '', 'odr_unit': row.odr_unit or '',
         'bid_except_type': row.bid_except_type or '',
         # V60z37: New fields from Prod. Reg. Status sheet
@@ -8064,6 +8065,7 @@ def _item_registration_columns(df):
         'category': find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
         'category_id': find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
         'req_no': find_column(df, ['Req. No', 'Req. No.', 'Request No', 'Request Number']),
+        'origin_nm': find_column(df, ['Origin Nm.', 'Origin Nm', 'Origin Name']),
         'prod_id': find_column(df, ['Prod. ID', 'Prod ID', 'Product ID']),
         'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
         'prod_name': find_column(df, ['Prod. Nm.', 'Prod. Nm', 'Product Name', 'Prod. Nm.(Eng.)']),
@@ -8186,7 +8188,7 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
             'client_name': clean(df_val(row, col['client_name'])),
             'operation_unit_name': clean(df_val(row, col['operation_unit_name'])),
             'category': category, 'category_id': category_id, 'pic': pic,
-            'req_no': req_no, 'prod_id': prod_id, 'product_status': clean(df_val(row, col['product_status'])),
+            'req_no': req_no, 'origin_nm': clean(df_val(row, col['origin_nm'])), 'prod_id': prod_id, 'product_status': clean(df_val(row, col['product_status'])),
             'prod_name': prod_name, 'spec': clean(df_val(row, col['spec'])),
             'mfr_name': clean(df_val(row, col['mfr_name'])), 'odr_unit': clean(df_val(row, col['odr_unit'])),
             'bid_except_type': clean(df_val(row, col['bid_except_type'])),
@@ -12326,7 +12328,7 @@ def get_item_registration_data():
             # req_by yang memang sering kosong di data produksi) melempar
             # TypeError 500 pada setiap search. Gunakan blob aman-None.
             sl = search.lower()
-            _IR_SEARCH_FIELDS = ('req_no', 'prod_id', 'prod_name', 'mfr_name', 'remarks',
+            _IR_SEARCH_FIELDS = ('req_no', 'origin_nm', 'prod_id', 'prod_name', 'mfr_name', 'remarks',
                                  'stock_no', 'req_owner', 'req_by', 'existing_owner')
             _source_rows = [d for d in _source_rows
                             if sl in ' '.join(str(d.get(fld) or '') for fld in _IR_SEARCH_FIELDS).lower()]
@@ -12513,7 +12515,7 @@ def apply_item_registration_request_filters(query):
     if search:
         pattern = f'%{search}%'
         # V60z37: Removed vendor_name (field deleted). Added stock_no + req_owner.
-        query = query.filter(db.or_(ItemRegistration.req_no.ilike(pattern), ItemRegistration.prod_id.ilike(pattern), ItemRegistration.prod_name.ilike(pattern), ItemRegistration.mfr_name.ilike(pattern), ItemRegistration.remarks.ilike(pattern), ItemRegistration.stock_no.ilike(pattern), ItemRegistration.req_owner.ilike(pattern), ItemRegistration.req_by.ilike(pattern), ItemRegistration.existing_owner.ilike(pattern)))
+        query = query.filter(db.or_(ItemRegistration.req_no.ilike(pattern), ItemRegistration.origin_nm.ilike(pattern), ItemRegistration.prod_id.ilike(pattern), ItemRegistration.prod_name.ilike(pattern), ItemRegistration.mfr_name.ilike(pattern), ItemRegistration.remarks.ilike(pattern), ItemRegistration.stock_no.ilike(pattern), ItemRegistration.req_owner.ilike(pattern), ItemRegistration.req_by.ilike(pattern), ItemRegistration.existing_owner.ilike(pattern)))
     if kpi_pic:
         query = apply_item_registration_pic_filter(query, [kpi_pic])
         query = apply_item_registration_kpi_status_filter(query)
@@ -12780,13 +12782,13 @@ def export_item_registration():
         ws.title = "Item Registration"
         # V60z47: Updated headers for Prod. Reg. Status structure (removed vendor fields, added new fields + Aging)
         headers = [
-            'Proc. Status', 'Aging', 'Req. Date', 'Existing Owner', 'Op. Unit Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Proc. Status', 'Aging', 'Req. Date', 'Existing Owner', 'Op. Unit Nm.', 'Category', 'PIC', 'Req. No', 'Origin Nm.', 'Prod. ID',
             'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Bid Except Type',
             'Stock No.', 'Req. Owner', 'Req. by', 'Sales PIC Nm.', 'Pre-Reg. ID',
             'Remarks'
         ]
         _style_wb(ws, headers, num_cols=[])
-        widths = [26, 8, 14, 20, 34, 24, 16, 18, 18, 28, 48, 24, 14, 28, 16, 18, 20, 20, 16, 60]
+        widths = [26, 8, 14, 20, 34, 24, 16, 18, 18, 18, 28, 48, 24, 14, 28, 16, 18, 20, 20, 16, 60]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         # V60z47: Calculate aging in export (days from req_date to today)
@@ -12813,6 +12815,7 @@ def export_item_registration():
                 source_category_level1(row.category),
                 row.pic or '',
                 row.req_no or '',
+                getattr(row, 'origin_nm', '') or '',
                 row.prod_id or '',
                 row.prod_name or '',
                 row.spec or '',
@@ -21877,6 +21880,7 @@ def get_todo_list_data():
                     'is_sales_status': resolved_pic == 'SALES',
                     'doc_no': clean(r.req_no) or '-',
                     'so_number': clean(r.req_no) or '',
+                    'origin_nm': clean(getattr(r, 'origin_nm', '')) or '',
                     'so_item': clean(r.stock_no) or '',
                     'secondary_no': clean_product_id(r.prod_id) or clean(r.stock_no) or '',
                     'client_or_unit': clean(r.operation_unit_name) or clean(r.client_name) or '',

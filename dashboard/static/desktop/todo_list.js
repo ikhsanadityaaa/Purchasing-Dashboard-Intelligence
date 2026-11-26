@@ -38,6 +38,7 @@
     'Op. Unit / Client': 220,
     'PIC': 82,
     'Req. No.': 116,
+    'Origin Nm.': 120,
     'Stock No.': 110,
     'Prod. ID': 104,
     'Prod. Nm.': 200,
@@ -815,6 +816,7 @@
           'Op. Unit / Client',
           'PIC',
           'Req. No.',
+          'Origin Nm.',
           'Stock No.',
           'Product ID',
           'Product Name',
@@ -834,6 +836,7 @@
               r.client_or_unit,
               r.pic,
               r.so_number,
+              r.origin_nm || '',
               r.so_item,
               r.product_id,
               r.product_name,
@@ -2174,6 +2177,7 @@
                       ['Op. Unit / Client', (r) => r.client_or_unit],
                       ['PIC', (r) => r.pic],
                       ['Req. No.', (r) => r.so_number],
+                      ['Origin Nm.', (r) => r.origin_nm || ''],
                       ['Stock No.', (r) => r.so_item],
                       ['Prod. ID', (r) => r.product_id],
                       ['Prod. Nm.', (r) => r.product_name],
@@ -2218,7 +2222,7 @@
                     null,
                     h(
                       'td',
-                      { colSpan: 14, className: 'tdl-empty-cell' },
+                      { colSpan: 15, className: 'tdl-empty-cell' },
                       'Memuat data Item Registration follow-up...'
                     )
                   )
@@ -2228,7 +2232,7 @@
                     null,
                     h(
                       'td',
-                      { colSpan: 14, className: 'tdl-empty-cell' },
+                      { colSpan: 15, className: 'tdl-empty-cell' },
                       'Tidak ada data Item Registration yang cocok dengan filter status/prioritas saat ini.'
                     )
                   )
@@ -2265,6 +2269,16 @@
                       h('td', { style: { minWidth: '160px' } }, item.client_or_unit || '-'),
                       h('td', { style: { textAlign: 'center', fontWeight: 800 } }, item.pic || '-'),
                       h('td', { style: { fontFamily: 'monospace', fontWeight: 700, whiteSpace: 'nowrap' } }, item.so_number || '-'),
+                      h(
+                        'td',
+                        {
+                          style: String(item.origin_nm || '').trim().toLowerCase().includes('south korea')
+                            ? { color: '#2563eb', fontWeight: 700, whiteSpace: 'nowrap' }
+                            : { whiteSpace: 'nowrap' },
+                          title: item.origin_nm || '',
+                        },
+                        item.origin_nm || '-'
+                      ),
                       h('td', { style: { fontFamily: 'monospace', textAlign: 'center' } }, item.so_item || '-'),
                       h('td', { style: { fontFamily: 'monospace', textAlign: 'center' } }, item.product_id || '-'),
                       h('td', { style: { minWidth: '180px', fontWeight: 600 } }, item.product_name || '-'),

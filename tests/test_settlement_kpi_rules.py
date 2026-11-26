@@ -105,7 +105,7 @@ class SettlementKpiRuleTests(unittest.TestCase):
         self.assertIn('label:`90-180 Days`,value:e.days_90_180,color:`#C2410C`', bundle)
         self.assertNotIn('#F97316', bundle)
         self.assertNotIn('#f97316', bundle)
-        self.assertIn('/assets/index-C9BxB1mr.js?v=desktop-34', index)
+        self.assertIn('/assets/index-C9BxB1mr.js?v=desktop-35', index)
 
     def test_fx_request_identifies_desktop_client(self):
         backend = (ROOT / 'dashboard/app.py').read_text('utf-8')
