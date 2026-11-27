@@ -21648,6 +21648,9 @@ def _todo_save_preferences_raw(payload):
     return clean_payload
 
 
+_TODO_BASE_BUILD_LOCK = threading.Lock()
+
+
 def _todo_merge_status_config(all_statuses_with_counts, saved_map, default_priority_list, default_unchecked_lower=None):
     default_unchecked_lower = default_unchecked_lower or set()
     saved_map = saved_map if isinstance(saved_map, dict) else {}
@@ -21775,133 +21778,161 @@ def get_todo_list_data():
             return False
 
         # 1. Load or reuse cached base Pending Delivery + Item Registration rows
+        #    Single-flight build lock + stale-while-upload so concurrent requests
+        #    and active Auto Update imports never stack or stall on SQLite locks.
         base_key = (_RUNTIME_CACHE_VERSION, today.isoformat())
         with _TODO_LIST_LOCK:
-            cached_base = _TODO_BASE_CACHE if _TODO_BASE_CACHE.get('key') == base_key else None
+            if _TODO_BASE_CACHE.get('key') == base_key:
+                cached_base = _TODO_BASE_CACHE
+            elif _upload_proc_active() and _TODO_BASE_CACHE.get('so_items') is not None:
+                cached_base = _TODO_BASE_CACHE
+            else:
+                cached_base = None
 
         if cached_base is not None:
             base_so_items = cached_base['so_items']
             base_ir_items = cached_base['ir_items']
             pic_totals = dict(cached_base['pic_totals'])
         else:
-            so_fields = (
-                SOData.id, SOData.so_number, SOData.so_item, SOData.so_status,
-                SOData.operation_unit_name, SOData.vendor_name, SOData.manufacturer_name,
-                SOData.customer_po_number, SOData.so_create_date, SOData.delivery_plan_date,
-                SOData.pic_name, SOData.sales_amount, SOData.purchasing_amount,
-                SOData.purchasing_price, SOData.so_qty, SOData.purchasing_currency,
-                SOData.purchasing_amount_idr, SOData.product_id, SOData.product_name,
-                SOData.specification, SOData.matched_po_number, SOData.remarks, SOData.currency,
-            )
-            so_rows = SOData.query.filter(
-                so_countable_sql_filter(),
-                ~SOData.so_status.in_(list(HIDDEN_SO_STATUSES))
-            ).options(load_only(*so_fields)).all()
+            with _TODO_BASE_BUILD_LOCK:
+                with _TODO_LIST_LOCK:
+                    recheck = _TODO_BASE_CACHE if _TODO_BASE_CACHE.get('key') == base_key else None
+                if recheck is not None:
+                    base_so_items = recheck['so_items']
+                    base_ir_items = recheck['ir_items']
+                    pic_totals = dict(recheck['pic_totals'])
+                else:
+                    _so_internal_ref_re = re.compile(r'(^|[\s,;]+)2\d{6,}')
+                    so_fields = (
+                        SOData.id, SOData.so_number, SOData.so_item, SOData.so_status,
+                        SOData.operation_unit_name, SOData.vendor_name, SOData.manufacturer_name,
+                        SOData.customer_po_number, SOData.delivery_memo, SOData.so_create_date, SOData.delivery_plan_date,
+                        SOData.pic_name, SOData.sales_amount, SOData.purchasing_amount,
+                        SOData.purchasing_price, SOData.so_qty, SOData.purchasing_currency,
+                        SOData.purchasing_amount_idr, SOData.product_id, SOData.product_name,
+                        SOData.specification, SOData.matched_po_number, SOData.remarks, SOData.currency,
+                    )
+                    so_rows_raw = db.session.query(*so_fields).filter(
+                        ~SOData.so_status.in_(list(HIDDEN_SO_STATUSES))
+                    ).all()
+                    so_rows = [
+                        r for r in so_rows_raw
+                        if not (_so_internal_ref_re.search(r.customer_po_number or '') or _so_internal_ref_re.search(r.delivery_memo or ''))
+                    ]
 
-            pic_totals = {}
-            base_so_items = []
+                    pic_totals = {}
+                    base_so_items = []
 
-            for r in so_rows:
-                st = clean(r.so_status) or 'Unknown'
-                raw_pic = clean(r.pic_name) or 'Unassigned'
-                is_sales_st = st in SALES_STATUSES
-                effective_pic = 'SALES' if (is_sales_st and raw_pic == 'Unassigned') else raw_pic
+                    for r in so_rows:
+                        st = clean(r.so_status) or 'Unknown'
+                        raw_pic = clean(r.pic_name) or 'Unassigned'
+                        is_sales_st = st in SALES_STATUSES
+                        effective_pic = 'SALES' if (is_sales_st and raw_pic == 'Unassigned') else raw_pic
 
-                for p_key in ({raw_pic, 'SALES'} if is_sales_st else {raw_pic}):
-                    if p_key:
-                        pic_totals[p_key] = pic_totals.get(p_key, 0) + 1
+                        for p_key in ({raw_pic, 'SALES'} if is_sales_st else {raw_pic}):
+                            if p_key:
+                                pic_totals[p_key] = pic_totals.get(p_key, 0) + 1
 
-                create_dt = r.so_create_date
-                age_days = max(0, (today - create_dt).days) if create_dt else 0
-                pur_idr = float(r.purchasing_amount_idr or 0)
-                if pur_idr <= 0:
-                    cur = (clean(r.purchasing_currency) or 'IDR').upper()
-                    raw_pur = float(r.purchasing_amount or 0) or (float(r.purchasing_price or 0) * float(r.so_qty or 0))
-                    if cur in ('', 'IDR'):
-                        pur_idr = raw_pur
-                sales_amt = float(r.sales_amount or 0)
-                amount_idr = pur_idr if pur_idr > 0 else sales_amt
+                        create_dt = r.so_create_date
+                        age_days = max(0, (today - create_dt).days) if create_dt else 0
+                        pur_idr = float(r.purchasing_amount_idr or 0)
+                        if pur_idr <= 0:
+                            cur = (clean(r.purchasing_currency) or 'IDR').upper()
+                            raw_pur = float(r.purchasing_amount or 0) or (float(r.purchasing_price or 0) * float(r.so_qty or 0))
+                            if cur in ('', 'IDR'):
+                                pur_idr = raw_pur
+                        sales_amt = float(r.sales_amount or 0)
+                        amount_idr = pur_idr if pur_idr > 0 else sales_amt
 
-                base_so_items.append({
-                    'uid': f'SO-{r.id}',
-                    'id': r.id,
-                    'source': 'pending_delivery',
-                    'source_label': 'Pending Delivery',
-                    'status': st,
-                    'pic': raw_pic,
-                    'effective_pic': effective_pic,
-                    'is_sales_status': is_sales_st,
-                    'doc_no': f"{clean(r.so_number) or '-'}-{clean(r.so_item) or ''}".rstrip('-'),
-                    'so_number': clean(r.so_number) or '',
-                    'so_item': clean(r.so_item) or '',
-                    'secondary_no': clean(r.matched_po_number) or clean(r.customer_po_number) or '',
-                    'client_or_unit': clean(r.operation_unit_name) or '',
-                    'vendor_or_mfr': clean(r.vendor_name) or clean(r.manufacturer_name) or '',
-                    'product_id': clean_product_id(r.product_id) or '',
-                    'product_name': clean(r.product_name) or '',
-                    'specification': clean(r.specification) or '',
-                    'qty': float(r.so_qty or 0),
-                    'amount_idr': round(amount_idr, 2),
-                    'create_date': create_dt.isoformat() if create_dt else '',
-                    'target_date': r.delivery_plan_date.isoformat() if r.delivery_plan_date else '',
-                    'age_days': age_days,
-                    'remarks': clean(r.remarks) or '',
-                })
+                        base_so_items.append({
+                            'uid': f'SO-{r.id}',
+                            'id': r.id,
+                            'source': 'pending_delivery',
+                            'source_label': 'Pending Delivery',
+                            'status': st,
+                            'pic': raw_pic,
+                            'effective_pic': effective_pic,
+                            'is_sales_status': is_sales_st,
+                            'doc_no': f"{clean(r.so_number) or '-'}-{clean(r.so_item) or ''}".rstrip('-'),
+                            'so_number': clean(r.so_number) or '',
+                            'so_item': clean(r.so_item) or '',
+                            'secondary_no': clean(r.matched_po_number) or clean(r.customer_po_number) or '',
+                            'client_or_unit': clean(r.operation_unit_name) or '',
+                            'vendor_or_mfr': clean(r.vendor_name) or clean(r.manufacturer_name) or '',
+                            'product_id': clean_product_id(r.product_id) or '',
+                            'product_name': clean(r.product_name) or '',
+                            'specification': clean(r.specification) or '',
+                            'qty': float(r.so_qty or 0),
+                            'amount_idr': round(amount_idr, 2),
+                            'create_date': create_dt.isoformat() if create_dt else '',
+                            'target_date': r.delivery_plan_date.isoformat() if r.delivery_plan_date else '',
+                            'age_days': age_days,
+                            'remarks': clean(r.remarks) or '',
+                        })
 
-            client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
-            bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
-            cat_by_id, cat_by_name = master_pic_maps()
-            pic_maps = {'client': client_pic_cache, 'bid_type': bid_type_pic_cache, 'cat_by_id': cat_by_id, 'cat_by_name': cat_by_name}
+                    client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+                    bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
+                    cat_by_id, cat_by_name = master_pic_maps()
+                    pic_maps = {'client': client_pic_cache, 'bid_type': bid_type_pic_cache, 'cat_by_id': cat_by_id, 'cat_by_name': cat_by_name}
 
-            ir_rows = ItemRegistration.query.filter(
-                ~item_registration_kpi_status_expr().in_(list(ITEM_REG_HIDDEN_STATUSES))
-            ).all()
+                    ir_fields = (
+                        ItemRegistration.id, ItemRegistration.proc_status, ItemRegistration.req_date,
+                        ItemRegistration.existing_owner, ItemRegistration.client_id, ItemRegistration.client_name,
+                        ItemRegistration.operation_unit_name, ItemRegistration.category, ItemRegistration.category_id,
+                        ItemRegistration.pic, ItemRegistration.req_no, ItemRegistration.origin_nm,
+                        ItemRegistration.prod_id, ItemRegistration.prod_name, ItemRegistration.spec,
+                        ItemRegistration.mfr_name, ItemRegistration.odr_unit, ItemRegistration.bid_except_type,
+                        ItemRegistration.stock_no, ItemRegistration.registration_date, ItemRegistration.remarks,
+                    )
+                    ir_rows = db.session.query(*ir_fields).filter(
+                        ~item_registration_kpi_status_expr().in_(list(ITEM_REG_HIDDEN_STATUSES))
+                    ).all()
 
-            base_ir_items = []
-            for r in ir_rows:
-                st = clean(r.proc_status) or 'Unknown'
-                st_lower = st.lower()
-                resolved_pic = resolve_item_registration_pic(r, maps=pic_maps) or 'Unassigned'
-                is_default_closed = st_lower in _TODO_DEFAULT_CLOSED_PROC_STATUSES_LOWER
-                if not is_default_closed:
-                    pic_totals[resolved_pic] = pic_totals.get(resolved_pic, 0) + 1
+                    base_ir_items = []
+                    for r in ir_rows:
+                        st = clean(r.proc_status) or 'Unknown'
+                        st_lower = st.lower()
+                        resolved_pic = resolve_item_registration_pic(r, maps=pic_maps) or 'Unassigned'
+                        is_default_closed = st_lower in _TODO_DEFAULT_CLOSED_PROC_STATUSES_LOWER
+                        if not is_default_closed:
+                            pic_totals[resolved_pic] = pic_totals.get(resolved_pic, 0) + 1
 
-                req_dt = r.req_date
-                age_days = max(0, (today - req_dt).days) if req_dt else 0
+                        req_dt = r.req_date
+                        age_days = max(0, (today - req_dt).days) if req_dt else 0
 
-                base_ir_items.append({
-                    'uid': f'IR-{r.id}',
-                    'id': r.id,
-                    'source': 'item_registration',
-                    'source_label': 'Item Registration',
-                    'status': st,
-                    'pic': resolved_pic,
-                    'effective_pic': resolved_pic,
-                    'is_sales_status': resolved_pic == 'SALES',
-                    'doc_no': clean(r.req_no) or '-',
-                    'so_number': clean(r.req_no) or '',
-                    'origin_nm': clean(getattr(r, 'origin_nm', '')) or '',
-                    'so_item': clean(r.stock_no) or '',
-                    'secondary_no': clean_product_id(r.prod_id) or clean(r.stock_no) or '',
-                    'client_or_unit': clean(r.operation_unit_name) or clean(r.client_name) or '',
-                    'vendor_or_mfr': clean(r.mfr_name) or '',
-                    'product_id': clean_product_id(r.prod_id) or '',
-                    'product_name': clean(r.prod_name) or '',
-                    'specification': clean(r.spec) or '',
-                    'qty': 1.0,
-                    'odr_unit': clean(r.odr_unit) or '',
-                    'amount_idr': 0.0,
-                    'create_date': req_dt.isoformat() if req_dt else '',
-                    'target_date': r.registration_date.isoformat() if getattr(r, 'registration_date', None) else '',
-                    'age_days': age_days,
-                    'remarks': clean(r.remarks) or clean(r.existing_owner) or clean(r.category) or '',
-                })
+                        base_ir_items.append({
+                            'uid': f'IR-{r.id}',
+                            'id': r.id,
+                            'source': 'item_registration',
+                            'source_label': 'Item Registration',
+                            'status': st,
+                            'pic': resolved_pic,
+                            'effective_pic': resolved_pic,
+                            'is_sales_status': resolved_pic == 'SALES',
+                            'doc_no': clean(r.req_no) or '-',
+                            'so_number': clean(r.req_no) or '',
+                            'origin_nm': clean(getattr(r, 'origin_nm', '')) or '',
+                            'so_item': clean(r.stock_no) or '',
+                            'secondary_no': clean_product_id(r.prod_id) or clean(r.stock_no) or '',
+                            'client_or_unit': clean(r.operation_unit_name) or clean(r.client_name) or '',
+                            'vendor_or_mfr': clean(r.mfr_name) or '',
+                            'product_id': clean_product_id(r.prod_id) or '',
+                            'product_name': clean(r.prod_name) or '',
+                            'specification': clean(r.spec) or '',
+                            'qty': 1.0,
+                            'odr_unit': clean(r.odr_unit) or '',
+                            'amount_idr': 0.0,
+                            'create_date': req_dt.isoformat() if req_dt else '',
+                            'target_date': r.registration_date.isoformat() if getattr(r, 'registration_date', None) else '',
+                            'age_days': age_days,
+                            'remarks': clean(r.remarks) or clean(r.existing_owner) or clean(r.category) or '',
+                        })
 
-            with _TODO_LIST_LOCK:
-                _TODO_BASE_CACHE['key'] = base_key
-                _TODO_BASE_CACHE['so_items'] = base_so_items
-                _TODO_BASE_CACHE['ir_items'] = base_ir_items
-                _TODO_BASE_CACHE['pic_totals'] = dict(pic_totals)
+                    with _TODO_LIST_LOCK:
+                        _TODO_BASE_CACHE['key'] = base_key
+                        _TODO_BASE_CACHE['so_items'] = base_so_items
+                        _TODO_BASE_CACHE['ir_items'] = base_ir_items
+                        _TODO_BASE_CACHE['pic_totals'] = dict(pic_totals)
 
         so_status_counts = {}
         raw_so_items = []

@@ -66,7 +66,7 @@ div.fixed.inset-0.bg-black\/50.z-\[9999\]{display:none!important}
 <script defer src="/desktop/sheet_sync.js?v=19"></script>
 <link rel="stylesheet" href="/desktop/sheet_sync.css?v=19">
 <link rel="stylesheet" href="/desktop/todo_list.css?v=12">
-<script defer src="/desktop/todo_list.js?v=12"></script>
+<script defer src="/desktop/todo_list.js?v=13"></script>
 <link rel="stylesheet" href="/desktop/vendor_control.css?v=3">
 <script defer src="/desktop/vendor_control.js?v=4"></script>
 <script type="module" src="/assets/index-C9BxB1mr.js?v=desktop-35"></script>
@@ -108,6 +108,7 @@ try {
 var SHOW_DELAY = 500;   // ms sebelum toast muncul
 var MIN_SHOW   = 600;   // durasi minimal tampil supaya tidak berkedip
 var HIDE_GRACE = 200;   // jeda setelah semua selesai sebelum disembunyikan
+var SILENT_BACKGROUND_LOADING = true; // Proses fetch/refresh berjalan diam di background tanpa toast tengah layar
 var inflight = 0, toast = null, textEl = null;
 var showTimer = null, hideTimer = null, shownAt = 0;
 
@@ -130,6 +131,7 @@ function renderText(){
 }
 function requestStarted(){
   inflight++;
+  if (SILENT_BACKGROUND_LOADING) return;
   if (hideTimer){ clearTimeout(hideTimer); hideTimer = null; }
   if (inflight === 1){
     if (showTimer) clearTimeout(showTimer);
@@ -148,6 +150,7 @@ function requestStarted(){
 }
 function requestFinished(){
   inflight = Math.max(0, inflight - 1);
+  if (SILENT_BACKGROUND_LOADING) return;
   if (inflight > 0) return;
   if (showTimer){ clearTimeout(showTimer); showTimer = null; }
   if (hideTimer) clearTimeout(hideTimer);
@@ -278,7 +281,9 @@ if (XO && XO.prototype){
       this._zTrackLoad = location.pathname.toLowerCase() !== '/ai_intelligence' && !/^(data:|blob:)/i.test(u) && !/\/api\/(upload(?:\/|$)|data\/pending-settlement(?:-detail)?|access\/activity|desktop\/(?:data-revision|status|logs|sheets\/status))(\/|\?|$)/i.test(u);
       if (this._zTrackLoad) requestStarted();
     } catch (e) { this._zTrackLoad = false; }
-    this.addEventListener('loadend', function(){ if (this._zTrackLoad) try { requestFinished(); } catch (e) {} });
+    var finished = false;
+    var doneOnce = function(){ if (!finished && this._zTrackLoad) { finished = true; try { requestFinished(); } catch (e) {} } }.bind(this);
+    this.addEventListener('loadend', doneOnce, { once: true });
     // Explicit ephemeral desktop session for all SAME-ORIGIN dashboard APIs,
     // including /api/upload/job-status polling and cache invalidation.
     // Never attach the token to company SAP/S-MRO or an external URL.
@@ -290,7 +295,12 @@ if (XO && XO.prototype){
         this.setRequestHeader('X-Serveone-Desktop-Upload', window.__serveoneDesktopUploadToken);
       }
     } catch (_e) {}
-    return _send.apply(this, arguments);
+    try {
+      return _send.apply(this, arguments);
+    } catch (sendErr) {
+      doneOnce();
+      throw sendErr;
+    }
   };
 }
 

@@ -359,7 +359,11 @@
     const [soStatusesMap, setSoStatusesMap] = React.useState(() => initialLocal.so_statuses || {});
     const [procStatusesMap, setProcStatusesMap] = React.useState(() => initialLocal.proc_statuses || {});
     const [prefsHydrated, setPrefsHydrated] = React.useState(false);
-    const [shouldSaveOnNextFetch, setShouldSaveOnNextFetch] = React.useState(false);
+    const savePrefsRef = React.useRef(false);
+    const setShouldSaveOnNextFetch = React.useCallback((val) => {
+      savePrefsRef.current = Boolean(val);
+    }, []);
+    const fetchAbortRef = React.useRef(null);
 
     // Independent table search, page, perPage, and dropdown open states
     const [soSearchDraft, setSoSearchDraft] = React.useState('');
@@ -573,10 +577,15 @@
 
     const fetchQueueData = React.useCallback(async () => {
       if (!prefsHydrated) return;
+      if (fetchAbortRef.current) {
+        try { fetchAbortRef.current.abort(); } catch (_) {}
+      }
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      fetchAbortRef.current = controller;
       setLoading(true);
       setError('');
-      const doSave = shouldSaveOnNextFetch;
-      if (doSave) setShouldSaveOnNextFetch(false);
+      const doSave = savePrefsRef.current;
+      savePrefsRef.current = false;
       try {
         const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
         if (window.__serveoneDesktopUploadToken) {
@@ -586,6 +595,7 @@
           method: 'POST',
           credentials: 'same-origin',
           cache: 'no-store',
+          signal: controller ? controller.signal : undefined,
           headers,
           body: JSON.stringify({
             save_prefs: doSave,
@@ -614,15 +624,18 @@
         if (!res.ok) {
           throw new Error(data.error || 'Gagal memuat data To Do List (HTTP ' + res.status + ')');
         }
+        if (controller && controller.signal.aborted) return;
         setPayload(data);
       } catch (err) {
+        if (err && err.name === 'AbortError') return;
         setError(err && err.message ? err.message : 'Gagal memuat data To Do List');
       } finally {
-        setLoading(false);
+        if (!controller || fetchAbortRef.current === controller) {
+          setLoading(false);
+        }
       }
     }, [
       prefsHydrated,
-      shouldSaveOnNextFetch,
       selectedPics,
       soPriorityOnly,
       irPriorityOnly,
@@ -649,9 +662,19 @@
     }, [fetchQueueData, dataRevision]);
 
     React.useEffect(() => {
-      const onLive = () => fetchQueueData();
+      let timer = null;
+      const onLive = () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = null;
+          fetchQueueData();
+        }, 500);
+      };
       window.addEventListener('serveone:data-changed', onLive);
-      return () => window.removeEventListener('serveone:data-changed', onLive);
+      return () => {
+        if (timer) clearTimeout(timer);
+        window.removeEventListener('serveone:data-changed', onLive);
+      };
     }, [fetchQueueData]);
 
     const handleTogglePic = (picName, singleClickMode) => {
